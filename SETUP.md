@@ -39,7 +39,7 @@ FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogra
 
 Or put them in a `.env` file in the repository root (it's in `.gitignore`), readable only by you, and load
 it into your shell. Creating the file private before writing to it keeps the hash from ever being readable
-by others:
+by others. Note that `install` replaces an existing `.env` with an empty file:
 
 ```sh
 install -m 600 /dev/null .env
@@ -91,7 +91,8 @@ repository, so the session never ends up in a commit and doesn't depend on where
 encrypted yet.
 
 Deleting the `tdlib` folder only logs you out locally: the session stays active on Telegram's side. To end
-it, terminate it in another Telegram app under **Settings → Devices**.
+it, terminate it from another Telegram app, in the **Devices** (mobile apps) or **Active Sessions**
+(Telegram Desktop) list in Settings.
 
 | Variable | Required | Meaning |
 |---|---|---|

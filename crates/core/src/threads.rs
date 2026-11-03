@@ -44,7 +44,8 @@ pub fn group(messages: &[Msg]) -> Vec<Thread> {
 
 fn root_of(i: usize, messages: &[Msg], index_of: &HashMap<i64, usize>) -> usize {
     // A reply chain without cycles reaches its root within `messages.len()`
-    // steps. Only malformed data loops longer; such a message is its own root.
+    // steps. Only malformed data loops longer: a message on a cycle, or whose
+    // chain leads into one, becomes its own root.
     let mut root = i;
     for _ in 0..messages.len() {
         match messages[root].reply_to.and_then(|id| index_of.get(&id)) {

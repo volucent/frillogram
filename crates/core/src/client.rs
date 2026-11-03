@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use tdlib_rs::{enums, functions, types};
 
@@ -28,18 +31,35 @@ impl Config {
     /// their own pair at <https://my.telegram.org>; they're never committed.
     /// `FRILLOGRAM_DATA_DIR` overrides where the TDLib database lives.
     pub fn from_env() -> Result<Self, String> {
-        let api_id = std::env::var("FRILLOGRAM_API_ID")
-            .map_err(|_| "FRILLOGRAM_API_ID is not set".to_string())?
+        Self::from_vars(|name| std::env::var_os(name), dirs::data_local_dir)
+    }
+
+    /// [`Config::from_env`] with the environment and the default data
+    /// directory passed in, so it can be tested.
+    fn from_vars(
+        var: impl Fn(&str) -> Option<OsString>,
+        default_dir: impl FnOnce() -> Option<PathBuf>,
+    ) -> Result<Self, String> {
+        // An empty or blank value usually means a failed `$(pass …)`, so it
+        // counts as unset.
+        let text =
+            |name: &str| var(name).and_then(|value| value.into_string().ok()).map(|value| value.trim().to_string());
+        let api_id = text("FRILLOGRAM_API_ID")
+            .filter(|id| !id.is_empty())
+            .ok_or("FRILLOGRAM_API_ID is not set")?
             .parse()
             .map_err(|_| "FRILLOGRAM_API_ID must be a number".to_string())?;
-        // An empty hash usually means a failed `$(pass …)`, so it counts as unset.
-        let api_hash = std::env::var("FRILLOGRAM_API_HASH")
-            .ok()
-            .filter(|hash| !hash.trim().is_empty())
-            .ok_or("FRILLOGRAM_API_HASH is not set")?;
-        let data_dir = match std::env::var_os("FRILLOGRAM_DATA_DIR") {
+        let api_hash =
+            text("FRILLOGRAM_API_HASH").filter(|hash| !hash.is_empty()).ok_or("FRILLOGRAM_API_HASH is not set")?;
+        // Not trimmed: spaces can be part of a path.
+        let data_dir = match var("FRILLOGRAM_DATA_DIR").filter(|dir| !dir.to_string_lossy().trim().is_empty()) {
+            // A relative path would depend on where Frillogram is launched
+            // from, and could put the session inside a repository.
+            Some(dir) if !Path::new(&dir).is_absolute() => {
+                return Err("FRILLOGRAM_DATA_DIR must be an absolute path".into());
+            }
             Some(dir) => PathBuf::from(dir),
-            None => dirs::data_local_dir().ok_or("no local data directory on this system")?.join("frillogram"),
+            None => default_dir().ok_or("no local data directory on this system")?.join("frillogram"),
         }
         .join("tdlib");
         Ok(Config { api_id, api_hash, data_dir })
@@ -84,6 +104,9 @@ impl Telegram {
                 });
                 // tdlib-rs panics on JSON it can't parse. Nothing would answer
                 // requests after that, so tell the UI instead of hanging.
+                // This only covers the receive thread: tdlib-rs's generated
+                // request functions can still panic on the caller's thread
+                // on a malformed response.
                 if std::panic::catch_unwind(receive).is_err() {
                     let error = "TDLib stopped unexpectedly. Restart Frillogram to reconnect.";
                     let _ = tx.send_blocking(Event::Error(error.into()));
@@ -226,4 +249,49 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 fn message(error: types::Error) -> String {
     error.message
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn config(vars: &[(&str, &str)]) -> Result<Config, String> {
+        let vars: HashMap<&str, OsString> = vars.iter().map(|&(name, value)| (name, value.into())).collect();
+        Config::from_vars(|name| vars.get(name).cloned(), || Some(PathBuf::from("/data")))
+    }
+
+    const CREDENTIALS: [(&str, &str); 2] = [("FRILLOGRAM_API_ID", " 123 "), ("FRILLOGRAM_API_HASH", " abc\n")];
+
+    #[test]
+    fn credentials_are_trimmed() {
+        let config = config(&CREDENTIALS).unwrap();
+        assert_eq!((config.api_id, config.api_hash.as_str()), (123, "abc"));
+        assert_eq!(config.data_dir, Path::new("/data/frillogram/tdlib"));
+    }
+
+    #[test]
+    fn blank_credentials_count_as_unset() {
+        let error = config(&[("FRILLOGRAM_API_ID", "  "), CREDENTIALS[1]]).unwrap_err();
+        assert_eq!(error, "FRILLOGRAM_API_ID is not set");
+        let error = config(&[CREDENTIALS[0], ("FRILLOGRAM_API_HASH", "")]).unwrap_err();
+        assert_eq!(error, "FRILLOGRAM_API_HASH is not set");
+        let error = config(&[("FRILLOGRAM_API_ID", "12a"), CREDENTIALS[1]]).unwrap_err();
+        assert_eq!(error, "FRILLOGRAM_API_ID must be a number");
+    }
+
+    #[test]
+    fn blank_data_dir_counts_as_unset() {
+        let config = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", " ")]).unwrap();
+        assert_eq!(config.data_dir, Path::new("/data/frillogram/tdlib"));
+    }
+
+    #[test]
+    fn data_dir_must_be_absolute() {
+        let error = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", "tdata")]).unwrap_err();
+        assert_eq!(error, "FRILLOGRAM_DATA_DIR must be an absolute path");
+        let config = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", "/elsewhere")]).unwrap();
+        assert_eq!(config.data_dir, Path::new("/elsewhere/tdlib"));
+    }
 }
