@@ -7,7 +7,7 @@ use frillogram_core::{
 use gpui_kit::{
     component::{
         ActiveTheme, Theme,
-        input::{InputEvent, InputState},
+        input::{InputEvent, InputState, TextareaState},
     },
     *,
 };
@@ -16,6 +16,8 @@ use gpui_kit::{
 const HISTORY_LIMIT: usize = 100;
 /// How many chats to ask TDLib for per request after login.
 const CHAT_LIMIT: i32 = 200;
+/// The composers grow with their text up to this many lines, then scroll.
+const COMPOSER_MAX_ROWS: usize = 6;
 
 pub struct FrillogramApp {
     pub(crate) tg: Option<Telegram>,
@@ -41,8 +43,9 @@ pub struct FrillogramApp {
     /// Root message id of the thread shown in the side panel.
     pub(crate) open_thread: Option<i64>,
     pub(crate) message_list: ListState,
-    pub(crate) composer: Entity<InputState>,
-    pub(crate) thread_composer: Entity<InputState>,
+    pub(crate) thread_scroll: ScrollHandle,
+    pub(crate) composer: Entity<TextareaState>,
+    pub(crate) thread_composer: Entity<TextareaState>,
 
     _subscriptions: Vec<Subscription>,
     _events: Option<Task<()>>,
@@ -53,13 +56,31 @@ impl FrillogramApp {
         let phone_input = cx.new(|cx| InputState::new(window, cx).placeholder("+1 555 123 4567"));
         let code_input = cx.new(|cx| InputState::new(window, cx).placeholder("Login code"));
         let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
-        let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
-        let thread_composer = cx.new(|cx| InputState::new(window, cx).placeholder("Reply in thread…"));
+        // Enter sends, Shift+Enter starts a new line.
+        let composer = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder(placeholder)
+                    .submit_on_enter(true)
+                    .auto_grow(1, COMPOSER_MAX_ROWS)
+            })
+        };
+        let thread_composer = composer("Reply in thread…", window, cx);
+        let composer = composer("Message", window, cx);
 
         Theme::sync_system_appearance(Some(window), cx);
-        let mut subscriptions = vec![cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
-        })];
+        let mut subscriptions = vec![
+            cx.observe_window_appearance(window, |_, window, cx| {
+                Theme::sync_system_appearance(Some(window), cx);
+            }),
+            // Messages that arrived while the window was in the background
+            // are read once the user comes back to it.
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.view_loaded_messages(cx);
+                }
+            }),
+        ];
         for input in [&phone_input, &code_input, &password_input] {
             subscriptions.push(cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -109,6 +130,7 @@ impl FrillogramApp {
             threads: Vec::new(),
             open_thread: None,
             message_list: ListState::new(0, ListAlignment::Bottom, px(600.)),
+            thread_scroll: ScrollHandle::new(),
             composer,
             thread_composer,
             _subscriptions: subscriptions,
@@ -131,7 +153,15 @@ impl FrillogramApp {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
                 self.busy = false;
-                self.focus_login_input(window, cx);
+                if self.auth == AuthStep::Ready {
+                    // The login input is gone, and no chat is open yet to
+                    // type into; picking one focuses the composer.
+                    if std::mem::discriminant(&previous) != std::mem::discriminant(&self.auth) {
+                        window.blur(cx);
+                    }
+                } else {
+                    self.focus_login_input(window, cx);
+                }
             }
             Event::Chat(chat) => {
                 self.chats.insert(chat.id, chat);
@@ -159,9 +189,13 @@ impl FrillogramApp {
             }
             Event::NewMessage(message) => {
                 if Some(message.chat_id) == self.selected_chat && !self.messages.iter().any(|m| m.id == message.id) {
-                    self.view_messages(message.chat_id, vec![message.id], cx);
+                    // Only mark it read if the user can see it; otherwise
+                    // that happens when the window is activated.
+                    if window.is_window_active() {
+                        self.view_messages(message.chat_id, vec![message.id], cx);
+                    }
                     self.messages.push(message);
-                    self.rethread();
+                    self.rethread(window, cx);
                 }
             }
             Event::MessageSent { .. }
@@ -172,7 +206,7 @@ impl FrillogramApp {
                     self.error = Some(error.clone());
                 }
                 if self.apply_message_change(&event) {
-                    self.rethread();
+                    self.rethread(window, cx);
                 }
                 if let Some(changes) = &mut self.changes_while_loading {
                     changes.push(event);
@@ -239,9 +273,10 @@ impl FrillogramApp {
         self.threads.clear();
         self.message_list.reset(0);
         self.open_thread = None;
+        self.error = None;
         self.composer.update(cx, |input, cx| input.focus(window, cx));
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Some(previous) = previous {
                 let _ = tg.close_chat(previous).await;
             }
@@ -258,7 +293,7 @@ impl FrillogramApp {
                 return;
             }
             let history = tg.history(chat_id, HISTORY_LIMIT).await;
-            let _ = this.update(cx, |app, cx| {
+            let _ = this.update_in(cx, |app, window, cx| {
                 if app.selected_chat != Some(chat_id) {
                     return;
                 }
@@ -273,8 +308,10 @@ impl FrillogramApp {
                         for change in app.changes_while_loading.take().unwrap_or_default() {
                             app.apply_message_change(&change);
                         }
-                        app.rethread();
-                        app.view_messages(chat_id, app.messages.iter().map(|m| m.id).collect(), cx);
+                        app.rethread(window, cx);
+                        if window.is_window_active() {
+                            app.view_loaded_messages(cx);
+                        }
                     }
                     Err(error) => {
                         app.changes_while_loading = None;
@@ -286,6 +323,14 @@ impl FrillogramApp {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Marks all loaded messages of the selected chat read on Telegram.
+    fn view_loaded_messages(&self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.selected_chat else { return };
+        if !self.messages.is_empty() {
+            self.view_messages(chat_id, self.messages.iter().map(|m| m.id).collect(), cx);
+        }
     }
 
     /// Marks messages of the open chat read on Telegram.
@@ -300,7 +345,11 @@ impl FrillogramApp {
     pub(crate) fn open_thread(&mut self, root_id: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
         self.open_thread = root_id;
         if root_id.is_some() {
+            self.thread_scroll.scroll_to_bottom();
             self.thread_composer.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            // The thread composer is no longer rendered, so it can't keep focus.
+            self.composer.update(cx, |input, cx| input.focus(window, cx));
         }
         cx.notify();
     }
@@ -366,11 +415,26 @@ impl FrillogramApp {
         }
     }
 
-    fn rethread(&mut self) {
+    fn rethread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Server ids grow over time; sorting keeps parents before replies,
         // which `threads::group` relies on.
         self.messages.sort_by_key(|m| m.id);
         let threads = threads::group(&self.messages);
+        // Close the thread panel if its root is gone, so replies can't go to
+        // a deleted message.
+        if let Some(root_id) = self.open_thread
+            && !self.messages.iter().any(|m| m.id == root_id)
+        {
+            self.open_thread = None;
+            if self.thread_composer.read(cx).focus_handle(cx).is_focused(window) {
+                self.composer.update(cx, |input, cx| input.focus(window, cx));
+            }
+        }
+        // Keep the thread panel at its newest reply, unless the user scrolled up.
+        let (offset, max) = (self.thread_scroll.offset(), self.thread_scroll.max_offset());
+        if self.open_thread.is_some() && offset.y <= -max.y + px(1.) {
+            self.thread_scroll.scroll_to_bottom();
+        }
         // Only replace the rows that changed, so the list keeps its scroll
         // position when a message arrives. `reset` is for switching chats.
         let old = &self.threads;

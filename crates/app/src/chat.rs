@@ -5,7 +5,7 @@ use gpui_kit::{
         ActiveTheme,
         button::{Button, ButtonVariants},
         h_flex,
-        input::Input,
+        input::Textarea,
         v_flex,
     },
     prelude::FluentBuilder,
@@ -111,7 +111,7 @@ impl FrillogramApp {
             )
             .child(div().flex_1().min_h_0().child(list))
             .children(self.render_error(cx))
-            .child(div().p_3().border_t_1().border_color(border).child(Input::new(&self.composer)))
+            .child(div().p_3().border_t_1().border_color(border).child(Textarea::new(&self.composer)))
     }
 
     /// The last error, if any, with a button to dismiss it.
@@ -141,14 +141,14 @@ impl FrillogramApp {
         let muted = cx.theme().muted_foreground;
         let link = cx.theme().primary;
 
-        let mut row = v_flex().px_4().py_1p5();
+        let root_id = root.id;
+        let mut row = v_flex().group("thread-row").relative().px_4().py_1p5();
         if thread.root_is_reply {
             row = row.child(div().pl(px(44.)).text_xs().text_color(muted).child("↪ reply to an earlier message"));
         }
         row = row.child(self.render_message(root, cx));
 
         if let Some(&last) = thread.replies.last() {
-            let root_id = root.id;
             let count = thread.replies.len();
             let label = if count == 1 { "1 reply".to_string() } else { format!("{count} replies") };
             row = row.child(
@@ -163,6 +163,22 @@ impl FrillogramApp {
                     .child(
                         div().text_color(muted).child(format!("Last reply {}", format_time(self.messages[last].date))),
                     ),
+            );
+        } else {
+            // A message without replies starts a thread from a link shown on hover.
+            row = row.child(
+                div()
+                    .id(ElementId::Name(format!("reply-in-thread-{root_id}").into()))
+                    .absolute()
+                    .top_1p5()
+                    .right_4()
+                    .invisible()
+                    .group_hover("thread-row", |link| link.visible())
+                    .text_sm()
+                    .text_color(link)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_thread(Some(root_id), window, cx)))
+                    .child("Reply in thread"),
             );
         }
         row
@@ -201,12 +217,13 @@ impl FrillogramApp {
                     .id("thread-messages")
                     .flex_1()
                     .overflow_y_scroll()
+                    .track_scroll(&self.thread_scroll)
                     .px_4()
                     .py_2()
                     .gap_2()
                     .children(messages.into_iter().map(|m| self.render_message(m, cx))),
             )
-            .child(div().p_3().border_t_1().border_color(border).child(Input::new(&self.thread_composer)))
+            .child(div().p_3().border_t_1().border_color(border).child(Textarea::new(&self.thread_composer)))
     }
 
     fn render_message(&self, message: &Msg, cx: &App) -> Div {
