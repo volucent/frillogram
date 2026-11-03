@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Range};
 
 use frillogram_core::{
-    AuthStep, ChatSummary, Config, Event, Msg, SenderId, Telegram,
+    AuthStep, ChatSummary, Config, ConfigError, Event, Msg, SendState, SenderId, Telegram,
     threads::{self, Thread},
 };
 use gpui_kit::{
@@ -22,7 +22,7 @@ const COMPOSER_MAX_ROWS: usize = 6;
 pub struct FrillogramApp {
     pub(crate) tg: Option<Telegram>,
     /// Set when the app can't start at all, e.g. API credentials are missing.
-    pub(crate) setup_error: Option<String>,
+    pub(crate) setup_error: Option<ConfigError>,
     pub(crate) auth: AuthStep,
     pub(crate) error: Option<String>,
     /// The chat `error` is about, if any. Switching chats hides only such
@@ -45,6 +45,9 @@ pub struct FrillogramApp {
     pub(crate) selected_chat: Option<i64>,
     /// Unsent composer text of chats other than the selected one.
     drafts: HashMap<i64, String>,
+    /// Errors about sends from chats that were no longer selected when they
+    /// failed, shown when the user comes back to them.
+    pending_errors: HashMap<i64, String>,
     /// Bumped by each `select_chat`, so a slower, older load can tell it's
     /// been superseded and leave the newer one's state alone.
     load_generation: u64,
@@ -60,9 +63,6 @@ pub struct FrillogramApp {
     thread_keys: Vec<RowKey>,
     /// Root message id of the thread shown in the side panel.
     pub(crate) open_thread: Option<i64>,
-    /// Server ids of the selected chat's messages that were pending, by their
-    /// temporary id, so a failed thread reply can still find its thread.
-    remapped_ids: HashMap<i64, i64>,
     pub(crate) message_list: ListState,
     pub(crate) thread_scroll: ScrollHandle,
     pub(crate) composer: Entity<TextareaState>,
@@ -73,7 +73,7 @@ pub struct FrillogramApp {
 }
 
 impl FrillogramApp {
-    pub fn new(config: Result<Config, String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(config: Result<Config, ConfigError>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let phone_input = cx.new(|cx| InputState::new(window, cx).placeholder("+1 555 123 4567"));
         let code_input = cx.new(|cx| InputState::new(window, cx).placeholder("Login code"));
         let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
@@ -152,6 +152,7 @@ impl FrillogramApp {
             user_names: HashMap::new(),
             selected_chat: None,
             drafts: HashMap::new(),
+            pending_errors: HashMap::new(),
             load_generation: 0,
             load_failed: false,
             messages: Vec::new(),
@@ -159,7 +160,6 @@ impl FrillogramApp {
             threads: Vec::new(),
             thread_keys: Vec::new(),
             open_thread: None,
-            remapped_ids: HashMap::new(),
             message_list: ListState::new(0, ListAlignment::Bottom, px(600.)),
             thread_scroll: ScrollHandle::new(),
             composer,
@@ -272,7 +272,7 @@ impl FrillogramApp {
         self.error_chat = chat;
     }
 
-    pub(crate) fn submit_login(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn submit_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tg) = self.tg else { return };
         let Some(input) = self.login_input(&self.auth) else { return };
         let value = input.read(cx).value();
@@ -287,7 +287,7 @@ impl FrillogramApp {
         let step = self.auth.clone();
         self.busy = true;
         self.error = None;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = match step {
                 AuthStep::Phone => tg.submit_phone(value).await,
                 AuthStep::Code { .. } => tg.submit_code(value).await,
@@ -295,9 +295,11 @@ impl FrillogramApp {
             };
             // On success TDLib moves to the next step with an Auth event.
             if let Err(error) = result {
-                let _ = this.update(cx, |app, cx| {
+                let _ = this.update_in(cx, |app, window, cx| {
                     app.show_error(error, None);
                     app.busy = false;
+                    // Clicking Next moved focus to it; the user retypes in the input.
+                    app.focus_login_input(window, cx);
                     cx.notify();
                 });
             }
@@ -344,10 +346,12 @@ impl FrillogramApp {
         self.thread_keys.clear();
         self.message_list.reset(0);
         self.open_thread = None;
-        self.remapped_ids.clear();
         self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
         if self.error_chat.take().is_some() {
             self.error = None;
+        }
+        if let Some(error) = self.pending_errors.remove(&chat_id) {
+            self.show_error(error, Some(chat_id));
         }
         self.composer.update(cx, |input, cx| input.focus(window, cx));
 
@@ -431,12 +435,20 @@ impl FrillogramApp {
         self.open_thread = root_id;
         if root_id.is_some() {
             self.thread_scroll.scroll_to_bottom();
+        }
+        if self.thread_root_state() == Some(SendState::Sent) {
             self.thread_composer.update(cx, |input, cx| input.focus(window, cx));
         } else {
-            // The thread composer is no longer rendered, so it can't keep focus.
+            // The thread composer isn't rendered, so it can't take focus.
             self.composer.update(cx, |input, cx| input.focus(window, cx));
         }
         cx.notify();
+    }
+
+    /// The send state of the open thread's root, if it's loaded.
+    pub(crate) fn thread_root_state(&self) -> Option<SendState> {
+        let root_id = self.open_thread?;
+        self.messages.iter().find(|m| m.id == root_id).map(|m| m.send_state)
     }
 
     fn send_from_composer(&mut self, in_thread: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -447,26 +459,45 @@ impl FrillogramApp {
             return;
         }
         // A thread reply is a plain Telegram reply to the thread's root.
-        let reply_to = if in_thread { self.open_thread } else { None };
+        // TDLib silently drops a reply to a message that hasn't reached the
+        // server and posts it to the whole chat, so the text stays here.
+        let reply_to = if in_thread {
+            let refusal = match self.thread_root_state() {
+                Some(SendState::Sent) => None,
+                Some(SendState::Failed) => Some("This message wasn't sent, so it can't be replied to."),
+                Some(SendState::Pending) | None => {
+                    Some("Wait until the message is sent before replying in its thread.")
+                }
+            };
+            if let Some(refusal) = refusal {
+                self.show_error(refusal.into(), Some(chat_id));
+                cx.notify();
+                return;
+            }
+            self.open_thread
+        } else {
+            None
+        };
         input.update(cx, |input, cx| input.set_value("", window, cx));
 
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = tg.send_text(chat_id, text.clone(), reply_to).await {
                 let _ = this.update_in(cx, |app, window, cx| {
                     let selected = app.selected_chat == Some(chat_id);
-                    let thread_open = thread_still_open(app.open_thread, reply_to, &app.remapped_ids);
+                    // The root was already sent, so its id hasn't changed since.
+                    let thread_open = reply_to.is_some() && app.open_thread == reply_to;
                     match restore_target(selected, in_thread, thread_open) {
                         // Only if nothing new was typed there meanwhile.
                         Restore::Composer if input.read(cx).value().is_empty() => {
                             restore_text(&input, text, window, cx);
                         }
                         Restore::Composer | Restore::Drop => {}
-                        Restore::Draft => {
-                            app.drafts.entry(chat_id).or_insert(text);
-                        }
+                        Restore::Draft => park_draft(&mut app.drafts, chat_id, &text),
                     }
                     if selected {
                         app.show_error(error, Some(chat_id));
+                    } else {
+                        app.pending_errors.insert(chat_id, error);
                     }
                     cx.notify();
                 });
@@ -484,16 +515,13 @@ impl FrillogramApp {
             Event::MessageSent { old_id, message } | Event::MessageSendFailed { old_id, message, .. }
                 if selected(message.chat_id) =>
             {
-                // The thread panel and replies may still point at the
-                // temporary id of a message that was pending.
+                // The thread panel follows its root to the server id, so it
+                // stays open. No reply can point at the temporary id: thread
+                // replies wait for their root to be sent, and TDLib drops any
+                // other reply to an unsent message.
                 let mut changed = false;
-                self.remapped_ids.insert(*old_id, message.id);
                 if self.open_thread == Some(*old_id) {
                     self.open_thread = Some(message.id);
-                    changed = true;
-                }
-                for reply in self.messages.iter_mut().filter(|m| m.reply_to == Some(*old_id)) {
-                    reply.reply_to = Some(message.id);
                     changed = true;
                 }
                 let Some(index) = self.messages.iter().position(|m| m.id == *old_id) else { return changed };
@@ -571,37 +599,37 @@ fn restore_text(input: &Entity<TextareaState>, text: String, window: &mut Window
     });
 }
 
-/// Where the text of a failed send goes back to.
+/// Where the text of a failed send goes back to. Its error shows either way,
+/// right away or when the user returns to the chat.
 #[derive(Debug, PartialEq)]
 enum Restore {
-    /// The composer it was sent from.
+    /// The composer it was sent from, if nothing was typed there meanwhile.
     Composer,
     /// Its chat's draft, for when that chat is no longer selected.
     Draft,
+    /// Nowhere it can be sent from as it was meant; the error says it wasn't sent.
     Drop,
 }
 
 fn restore_target(chat_selected: bool, in_thread: bool, thread_open: bool) -> Restore {
-    if !chat_selected {
-        // No error can show there, so the text is kept for when the user
-        // comes back, even a thread reply's: nothing sends it unseen.
-        Restore::Draft
-    } else if !in_thread || thread_open {
+    if in_thread {
+        // A thread reply only goes back to its own thread's composer. In the
+        // main composer or draft, Enter would post it to the whole chat.
+        if chat_selected && thread_open { Restore::Composer } else { Restore::Drop }
+    } else if chat_selected {
         Restore::Composer
     } else {
-        // Its thread is closed. In the main composer Enter would post it to
-        // the whole chat, so it's dropped and the error says it wasn't sent.
-        Restore::Drop
+        Restore::Draft
     }
 }
 
-/// Whether the thread panel still shows the thread rooted at `root`, which
-/// may have been a pending message that got its server id since.
-fn thread_still_open(open_thread: Option<i64>, root: Option<i64>, remapped_ids: &HashMap<i64, i64>) -> bool {
-    match (open_thread, root) {
-        (Some(open), Some(root)) => open == root || remapped_ids.get(&root) == Some(&open),
-        _ => false,
+/// Adds `text` to `chat_id`'s draft, after whatever was typed there since.
+fn park_draft(drafts: &mut HashMap<i64, String>, chat_id: i64, text: &str) {
+    let draft = drafts.entry(chat_id).or_default();
+    if !draft.is_empty() {
+        draft.push('\n');
     }
+    draft.push_str(text);
 }
 
 /// Identifies a message list row by content: its root id, reply ids and
@@ -639,7 +667,7 @@ impl Render for FrillogramApp {
             self.visible_chats = visible_chats(&self.chats);
         }
         let body = if let Some(error) = &self.setup_error {
-            self.render_setup(error.clone(), cx).into_any_element()
+            self.render_setup(error, cx).into_any_element()
         } else if self.auth == AuthStep::Ready {
             self.render_main(window, cx).into_any_element()
         } else {
@@ -656,7 +684,7 @@ mod tests {
 
     use frillogram_core::{ChatSummary, Msg, SendState, SenderId, threads};
 
-    use super::{Restore, changed_rows, restore_target, row_keys, thread_still_open, visible_chats};
+    use super::{Restore, changed_rows, park_draft, restore_target, row_keys, visible_chats};
 
     #[test]
     fn identical_rows_change_nothing() {
@@ -715,19 +743,22 @@ mod tests {
     fn failed_send_text_goes_back_where_it_can_be_sent_again() {
         assert_eq!(restore_target(true, false, false), Restore::Composer);
         assert_eq!(restore_target(true, true, true), Restore::Composer);
-        assert_eq!(restore_target(true, true, false), Restore::Drop);
         assert_eq!(restore_target(false, false, false), Restore::Draft);
-        assert_eq!(restore_target(false, true, true), Restore::Draft);
     }
 
     #[test]
-    fn thread_stays_open_across_its_root_getting_a_server_id() {
-        let remapped = HashMap::from([(-5, 42)]);
-        assert!(thread_still_open(Some(7), Some(7), &remapped));
-        assert!(thread_still_open(Some(42), Some(-5), &remapped));
-        assert!(!thread_still_open(Some(8), Some(7), &remapped));
-        assert!(!thread_still_open(Some(42), Some(-6), &remapped));
-        assert!(!thread_still_open(None, Some(7), &remapped));
-        assert!(!thread_still_open(None, None, &remapped));
+    fn failed_thread_reply_never_lands_in_the_main_draft() {
+        assert_eq!(restore_target(true, true, false), Restore::Drop);
+        assert_eq!(restore_target(false, true, true), Restore::Drop);
+        assert_eq!(restore_target(false, true, false), Restore::Drop);
+    }
+
+    #[test]
+    fn parked_text_is_appended_to_an_existing_draft() {
+        let mut drafts = HashMap::new();
+        park_draft(&mut drafts, 1, "first");
+        assert_eq!(drafts[&1], "first");
+        park_draft(&mut drafts, 1, "second");
+        assert_eq!(drafts[&1], "first\nsecond");
     }
 }

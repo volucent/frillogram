@@ -1,4 +1,4 @@
-use frillogram_core::AuthStep;
+use frillogram_core::{AuthStep, ConfigError};
 use gpui_kit::{
     component::{
         ActiveTheme, Disableable,
@@ -16,12 +16,13 @@ const RUN_WITH_PASS: &str =
     "FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogram/api_hash) cargo run";
 
 impl FrillogramApp {
-    pub(crate) fn render_setup(&self, error: String, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_setup(&self, error: &ConfigError, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        centered(
-            card(cx)
-                .child(div().text_xl().font_weight(FontWeight::BOLD).child("Frillogram needs API credentials"))
-                .child(div().text_color(cx.theme().danger).child(error))
+        let card = card(cx)
+            .child(div().text_xl().font_weight(FontWeight::BOLD).child("Frillogram can't start"))
+            .child(div().text_color(cx.theme().danger).child(error.to_string()));
+        let card = match error {
+            ConfigError::Credentials(_) => card
                 .child(div().text_color(muted).child(
                     "Create an app at my.telegram.org → API development tools, then start Frillogram with the \
                      credentials set, for example from pass:",
@@ -39,7 +40,13 @@ impl FrillogramApp {
                     "SETUP.md also covers a private .env file. Avoid typing the hash itself on the command line, \
                      where it stays in your shell history.",
                 )),
-        )
+            ConfigError::DataDir(_) => card.child(
+                div()
+                    .text_color(muted)
+                    .child("SETUP.md’s “Where data is kept” explains where Frillogram keeps its data."),
+            ),
+        };
+        centered(card)
     }
 
     pub(crate) fn render_login(&self, cx: &mut Context<Self>) -> impl IntoElement {

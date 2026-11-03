@@ -23,8 +23,7 @@ pub struct Thread {
 ///
 /// A reply whose parent isn't in `messages` starts its own thread, since there
 /// is nothing loaded to attach it to. Parents are found by id, wherever they
-/// sit: a pending reply's temporary id can be smaller than its root's once the
-/// root is confirmed and gets its server id.
+/// sit, so the result doesn't depend on replies sorting after their parents.
 pub fn group(messages: &[Msg]) -> Vec<Thread> {
     let index_of: HashMap<i64, usize> = messages.iter().enumerate().map(|(i, m)| (m.id, i)).collect();
     let roots: Vec<usize> = (0..messages.len()).map(|i| root_of(i, messages, &index_of)).collect();
@@ -98,11 +97,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_reply_stays_with_a_root_confirmed_after_it() {
-        // The root was confirmed as 9 while its reply still has temporary id 7,
-        // so sorted by id the reply comes first.
-        let reply = Msg { send_state: SendState::Pending, ..msg(7, Some(9)) };
-        let threads = group(&[msg(1, None), reply, msg(9, None)]);
+    fn reply_joins_a_root_that_comes_after_it() {
+        let threads = group(&[msg(1, None), msg(7, Some(9)), msg(9, None)]);
         assert_eq!(
             threads,
             vec![

@@ -144,8 +144,12 @@ impl FrillogramApp {
                 .text_color(cx.theme().danger)
                 .child(div().flex_1().min_w_0().child(error))
                 .child(Button::new("dismiss-error").ghost().label("Dismiss").on_click(cx.listener(
-                    |this, _, _, cx| {
+                    |this, _, window, cx| {
                         this.error = None;
+                        // Clicking moved focus to this button, which is now gone.
+                        if this.selected_chat.is_some() {
+                            this.composer.update(cx, |input, cx| input.focus(window, cx));
+                        }
                         cx.notify();
                     },
                 ))),
@@ -184,8 +188,9 @@ impl FrillogramApp {
                             .child(format!("Last reply {}", format_time(self.messages[last].date, today))),
                     ),
             );
-        } else {
-            // A message without replies starts a thread from a link shown on hover.
+        } else if root.send_state == SendState::Sent {
+            // A message without replies starts a thread from a link shown on
+            // hover. TDLib can't reply to a message that isn't on the server yet.
             row = row.child(
                 div()
                     .id(("reply-in-thread", root_id as u64))
@@ -205,7 +210,7 @@ impl FrillogramApp {
     }
 
     fn render_thread_panel(&self, root_id: i64, today: NaiveDate, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = cx.theme().border;
+        let (border, muted) = (cx.theme().border, cx.theme().muted_foreground);
         let thread = self.threads.iter().find(|t| self.messages[t.root].id == root_id);
         let messages: Vec<&Msg> = thread
             .map(|t| std::iter::once(t.root).chain(t.replies.iter().copied()).map(|i| &self.messages[i]).collect())
@@ -243,7 +248,15 @@ impl FrillogramApp {
                     .gap_2()
                     .children(messages.into_iter().map(|m| self.render_message(m, today, cx))),
             )
-            .child(div().p_3().border_t_1().border_color(border).child(Textarea::new(&self.thread_composer)))
+            .child(div().p_3().border_t_1().border_color(border).map(|footer| {
+                // A reply to a root that isn't on the server yet would go to
+                // the whole chat, so there's no composer until it is.
+                match self.thread_root_state() {
+                    Some(SendState::Sent) => footer.child(Textarea::new(&self.thread_composer)),
+                    Some(SendState::Pending) => footer.text_sm().text_color(muted).child("Sending…"),
+                    Some(SendState::Failed) | None => footer.text_sm().text_color(muted).child("Not sent"),
+                }
+            }))
     }
 
     fn render_message(&self, message: &Msg, today: NaiveDate, cx: &App) -> Div {

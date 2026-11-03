@@ -87,8 +87,8 @@ TDLib's database (your login session and message cache) lives in a `tdlib` folde
 `~/Library/Application Support/frillogram` on macOS and `~/.local/share/frillogram` on Linux. Set
 `FRILLOGRAM_DATA_DIR` to use another folder instead of `frillogram`, for example a separate one for a
 second account or for testing; the `tdlib` folder is created inside it. Use an absolute path outside the
-repository, so the session never ends up in a commit and doesn't depend on where you launch from. It isn't
-encrypted yet.
+repository, so the session never ends up in a commit and doesn't depend on where you launch from:
+Frillogram refuses to start with a relative one. An empty value means the default. It isn't encrypted yet.
 
 Deleting the `tdlib` folder only logs you out locally: the session stays active on Telegram's side. To end
 it, terminate it from another Telegram app, in the **Devices** (mobile apps) or **Active Sessions**
@@ -98,4 +98,4 @@ it, terminate it from another Telegram app, in the **Devices** (mobile apps) or 
 |---|---|---|
 | `FRILLOGRAM_API_ID` | yes | Your app's `api_id` from my.telegram.org. |
 | `FRILLOGRAM_API_HASH` | yes | Your app's `api_hash` from my.telegram.org. |
-| `FRILLOGRAM_DATA_DIR` | no | An absolute path outside the repository to keep TDLib's database in (under `tdlib/`) instead of the default above. |
+| `FRILLOGRAM_DATA_DIR` | no | An absolute path outside the repository to keep TDLib's database in (under `tdlib/`) instead of the default above. A relative path is refused at startup; an empty value means the default. |

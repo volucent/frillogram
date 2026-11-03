@@ -26,11 +26,28 @@ impl std::fmt::Debug for Config {
     }
 }
 
+/// Why [`Config::from_env`] failed, so the setup screen can say what to fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// `FRILLOGRAM_API_ID` or `FRILLOGRAM_API_HASH` is missing or malformed.
+    Credentials(String),
+    /// There's no usable place for TDLib's database.
+    DataDir(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::Credentials(error) | ConfigError::DataDir(error) => f.write_str(error),
+        }
+    }
+}
+
 impl Config {
     /// Reads `FRILLOGRAM_API_ID` and `FRILLOGRAM_API_HASH`. Each user gets
     /// their own pair at <https://my.telegram.org>; they're never committed.
     /// `FRILLOGRAM_DATA_DIR` overrides where the TDLib database lives.
-    pub fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_vars(|name| std::env::var_os(name), dirs::data_local_dir)
     }
 
@@ -39,27 +56,34 @@ impl Config {
     fn from_vars(
         var: impl Fn(&str) -> Option<OsString>,
         default_dir: impl FnOnce() -> Option<PathBuf>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, ConfigError> {
+        let credentials = |error: String| ConfigError::Credentials(error);
         // An empty or blank value usually means a failed `$(pass …)`, so it
         // counts as unset.
-        let text =
-            |name: &str| var(name).and_then(|value| value.into_string().ok()).map(|value| value.trim().to_string());
-        let api_id = text("FRILLOGRAM_API_ID")
-            .filter(|id| !id.is_empty())
-            .ok_or("FRILLOGRAM_API_ID is not set")?
+        let text = |name: &str| {
+            var(name)
+                .map(OsString::into_string)
+                .transpose()
+                .map(|value| value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()))
+                .map_err(|_| credentials(format!("{name} is not valid UTF-8")))
+        };
+        let api_id = text("FRILLOGRAM_API_ID")?
+            .ok_or_else(|| credentials("FRILLOGRAM_API_ID is not set".into()))?
             .parse()
-            .map_err(|_| "FRILLOGRAM_API_ID must be a number".to_string())?;
+            .map_err(|_| credentials("FRILLOGRAM_API_ID must be a number".into()))?;
         let api_hash =
-            text("FRILLOGRAM_API_HASH").filter(|hash| !hash.is_empty()).ok_or("FRILLOGRAM_API_HASH is not set")?;
+            text("FRILLOGRAM_API_HASH")?.ok_or_else(|| credentials("FRILLOGRAM_API_HASH is not set".into()))?;
         // Not trimmed: spaces can be part of a path.
         let data_dir = match var("FRILLOGRAM_DATA_DIR").filter(|dir| !dir.to_string_lossy().trim().is_empty()) {
             // A relative path would depend on where Frillogram is launched
             // from, and could put the session inside a repository.
             Some(dir) if !Path::new(&dir).is_absolute() => {
-                return Err("FRILLOGRAM_DATA_DIR must be an absolute path".into());
+                return Err(ConfigError::DataDir("FRILLOGRAM_DATA_DIR must be an absolute path".into()));
             }
             Some(dir) => PathBuf::from(dir),
-            None => default_dir().ok_or("no local data directory on this system")?.join("frillogram"),
+            None => default_dir()
+                .ok_or_else(|| ConfigError::DataDir("no local data directory on this system".into()))?
+                .join("frillogram"),
         }
         .join("tdlib");
         Ok(Config { api_id, api_hash, data_dir })
@@ -257,9 +281,18 @@ mod tests {
 
     use super::*;
 
-    fn config(vars: &[(&str, &str)]) -> Result<Config, String> {
-        let vars: HashMap<&str, OsString> = vars.iter().map(|&(name, value)| (name, value.into())).collect();
+    fn config(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        let vars: Vec<(&str, OsString)> = vars.iter().map(|&(name, value)| (name, value.into())).collect();
+        config_os(vars)
+    }
+
+    fn config_os(vars: Vec<(&str, OsString)>) -> Result<Config, ConfigError> {
+        let vars: HashMap<&str, OsString> = vars.into_iter().collect();
         Config::from_vars(|name| vars.get(name).cloned(), || Some(PathBuf::from("/data")))
+    }
+
+    fn credentials_error(error: &str) -> ConfigError {
+        ConfigError::Credentials(error.into())
     }
 
     const CREDENTIALS: [(&str, &str); 2] = [("FRILLOGRAM_API_ID", " 123 "), ("FRILLOGRAM_API_HASH", " abc\n")];
@@ -274,11 +307,22 @@ mod tests {
     #[test]
     fn blank_credentials_count_as_unset() {
         let error = config(&[("FRILLOGRAM_API_ID", "  "), CREDENTIALS[1]]).unwrap_err();
-        assert_eq!(error, "FRILLOGRAM_API_ID is not set");
+        assert_eq!(error, credentials_error("FRILLOGRAM_API_ID is not set"));
         let error = config(&[CREDENTIALS[0], ("FRILLOGRAM_API_HASH", "")]).unwrap_err();
-        assert_eq!(error, "FRILLOGRAM_API_HASH is not set");
+        assert_eq!(error, credentials_error("FRILLOGRAM_API_HASH is not set"));
         let error = config(&[("FRILLOGRAM_API_ID", "12a"), CREDENTIALS[1]]).unwrap_err();
-        assert_eq!(error, "FRILLOGRAM_API_ID must be a number");
+        assert_eq!(error, credentials_error("FRILLOGRAM_API_ID must be a number"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_credentials_are_reported_as_such() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = || OsString::from_vec(vec![b'1', 0xff]);
+        let error = config_os(vec![("FRILLOGRAM_API_ID", invalid()), (CREDENTIALS[1].0, CREDENTIALS[1].1.into())]);
+        assert_eq!(error.unwrap_err(), credentials_error("FRILLOGRAM_API_ID is not valid UTF-8"));
+        let error = config_os(vec![(CREDENTIALS[0].0, CREDENTIALS[0].1.into()), ("FRILLOGRAM_API_HASH", invalid())]);
+        assert_eq!(error.unwrap_err(), credentials_error("FRILLOGRAM_API_HASH is not valid UTF-8"));
     }
 
     #[test]
@@ -290,7 +334,7 @@ mod tests {
     #[test]
     fn data_dir_must_be_absolute() {
         let error = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", "tdata")]).unwrap_err();
-        assert_eq!(error, "FRILLOGRAM_DATA_DIR must be an absolute path");
+        assert_eq!(error, ConfigError::DataDir("FRILLOGRAM_DATA_DIR must be an absolute path".into()));
         let config = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", "/elsewhere")]).unwrap();
         assert_eq!(config.data_dir, Path::new("/elsewhere/tdlib"));
     }
