@@ -27,7 +27,9 @@ impl FrillogramApp {
     }
 
     fn render_chat_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut chats: Vec<&ChatSummary> = self.chats.values().filter(|c| c.order > 0).collect();
+        // Channels stay hidden until sponsored messages are shown, which
+        // Telegram's API terms require for any client that displays channels.
+        let mut chats: Vec<&ChatSummary> = self.chats.values().filter(|c| c.order > 0 && !c.is_channel).collect();
         chats.sort_by_key(|c| std::cmp::Reverse((c.order, c.id)));
 
         let theme = cx.theme();
@@ -84,8 +86,8 @@ impl FrillogramApp {
                 .h_full()
                 .items_center()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("Pick a chat");
+                .child(div().text_color(cx.theme().muted_foreground).child("Pick a chat"))
+                .children(self.render_error(cx));
         };
 
         let list = list(
@@ -108,7 +110,28 @@ impl FrillogramApp {
                     .child(chat.title.clone()),
             )
             .child(div().flex_1().min_h_0().child(list))
+            .children(self.render_error(cx))
             .child(div().p_3().border_t_1().border_color(border).child(Input::new(&self.composer)))
+    }
+
+    /// The last error, if any, with a button to dismiss it.
+    fn render_error(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let error = self.error.clone()?;
+        Some(
+            h_flex()
+                .px_4()
+                .py_1()
+                .gap_2()
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(div().flex_1().min_w_0().child(error))
+                .child(Button::new("dismiss-error").ghost().label("Dismiss").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.error = None;
+                        cx.notify();
+                    },
+                ))),
+        )
     }
 
     /// One row of the main list: a thread's root message and a summary of its replies.

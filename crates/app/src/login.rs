@@ -47,9 +47,6 @@ impl FrillogramApp {
                     if hint.is_empty() { "Two-step verification is on.".into() } else { format!("Hint: {hint}") };
                 ("Enter your password", hint, Some(&self.password_input))
             }
-            AuthStep::OtherDevice { link } => {
-                ("Confirm on another device", format!("Open this link in a logged-in Telegram app: {link}"), None)
-            }
             AuthStep::Unsupported(reason) => ("Can't log in here yet", reason.clone(), None),
             AuthStep::Starting | AuthStep::Ready => ("Connecting…", String::new(), None),
             AuthStep::Closed => ("Disconnected", "Restart Frillogram to reconnect.".into(), None),

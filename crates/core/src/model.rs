@@ -33,6 +33,7 @@ pub struct ChatSummary {
     /// Position in the main chat list; 0 means the chat is not in it.
     /// Chats sort by `(order, id)` descending, which also puts pinned chats first.
     pub order: i64,
+    pub is_channel: bool,
 }
 
 /// What the login screen should ask for next.
@@ -47,11 +48,7 @@ pub enum AuthStep {
     Password {
         hint: String,
     },
-    /// Login confirmed by scanning this `tg://login` link as a QR code in another app.
-    OtherDevice {
-        link: String,
-    },
-    /// A step Frillogram can't handle yet (email login, sign-up, Premium purchase).
+    /// A step Frillogram can't handle yet (QR or email login, sign-up, Premium purchase).
     Unsupported(String),
     Ready,
     Closed,
@@ -85,6 +82,11 @@ pub enum Event {
         old_id: i64,
         message: Msg,
     },
+    /// A message sent from here was rejected, with Telegram's reason.
+    MessageSendFailed {
+        old_id: i64,
+        error: String,
+    },
     User {
         id: i64,
         name: String,
@@ -113,6 +115,7 @@ impl Event {
             U::MessageSendSucceeded(u) => {
                 Event::MessageSent { old_id: u.old_message_id, message: Msg::from(u.message) }
             }
+            U::MessageSendFailed(u) => Event::MessageSendFailed { old_id: u.old_message_id, error: u.error.message },
             U::User(u) => Event::User { id: u.user.id, name: user_name(&u.user) },
             _ => return None,
         })
@@ -125,9 +128,9 @@ impl From<enums::AuthorizationState> for AuthStep {
         match state {
             A::WaitTdlibParameters => AuthStep::Starting,
             A::WaitPhoneNumber => AuthStep::Phone,
-            A::WaitCode(s) => AuthStep::Code { hint: format!("Code sent to {}", s.code_info.phone_number) },
+            A::WaitCode(s) => AuthStep::Code { hint: code_hint(&s.code_info) },
             A::WaitPassword(s) => AuthStep::Password { hint: s.password_hint },
-            A::WaitOtherDeviceConfirmation(s) => AuthStep::OtherDevice { link: s.link },
+            A::WaitOtherDeviceConfirmation(_) => AuthStep::Unsupported("QR code login isn't supported yet.".into()),
             A::WaitEmailAddress(_) | A::WaitEmailCode(_) => {
                 AuthStep::Unsupported("Email login isn't supported yet.".into())
             }
@@ -152,6 +155,7 @@ impl From<types::Chat> for ChatSummary {
             last_message: chat.last_message.as_ref().map(preview),
             unread: chat.unread_count,
             order: main_list_order(&chat.positions).unwrap_or(0),
+            is_channel: matches!(chat.r#type, enums::ChatType::Supergroup(ref s) if s.is_channel),
         }
     }
 }
@@ -178,6 +182,20 @@ impl From<types::Message> for Msg {
             reply_to,
             outgoing: message.is_outgoing,
         }
+    }
+}
+
+/// Where the login code went, e.g. "Code sent by SMS to +1 555 123 4567".
+fn code_hint(info: &types::AuthenticationCodeInfo) -> String {
+    use enums::AuthenticationCodeType as T;
+    let phone = &info.phone_number;
+    match &info.r#type {
+        T::TelegramMessage(_) => format!("Code sent to your Telegram app on another device ({phone})."),
+        T::Sms(_) | T::SmsWord(_) | T::SmsPhrase(_) => format!("Code sent by SMS to {phone}."),
+        T::Call(_) => format!("You'll get a call at {phone} with the code."),
+        T::FlashCall(_) | T::MissedCall(_) => format!("Code sent to {phone} as a phone call."),
+        T::Fragment(_) => format!("Code sent to {phone} on fragment.com."),
+        _ => format!("Code sent to {phone}."),
     }
 }
 

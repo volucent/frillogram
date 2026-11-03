@@ -150,6 +150,7 @@ impl FrillogramApp {
             }
             Event::NewMessage(message) => {
                 if Some(message.chat_id) == self.selected_chat && !self.messages.iter().any(|m| m.id == message.id) {
+                    self.view_messages(message.chat_id, vec![message.id], cx);
                     self.messages.push(message);
                     self.rethread();
                 }
@@ -159,6 +160,14 @@ impl FrillogramApp {
                     *pending = message;
                     self.rethread();
                 }
+            }
+            Event::MessageSendFailed { old_id, error } => {
+                let count = self.messages.len();
+                self.messages.retain(|m| m.id != old_id);
+                if self.messages.len() != count {
+                    self.rethread();
+                }
+                self.error = Some(error);
             }
             Event::User { id, name } => {
                 self.user_names.insert(id, name);
@@ -225,15 +234,27 @@ impl FrillogramApp {
         }
         let previous = self.selected_chat.replace(chat_id);
         self.messages.clear();
+        self.threads.clear();
+        self.message_list.reset(0);
         self.open_thread = None;
-        self.rethread();
         self.composer.update(cx, |input, cx| input.focus(window, cx));
 
         cx.spawn(async move |this, cx| {
             if let Some(previous) = previous {
                 let _ = tg.close_chat(previous).await;
             }
+            // Another click may have picked a different chat while this one
+            // was closing the previous; opening it now would leave it open.
+            let still_selected =
+                |cx: &mut AsyncApp| this.read_with(cx, |app, _| app.selected_chat == Some(chat_id)).unwrap_or(false);
+            if !still_selected(cx) {
+                return;
+            }
             let _ = tg.open_chat(chat_id).await;
+            if !still_selected(cx) {
+                let _ = tg.close_chat(chat_id).await;
+                return;
+            }
             let history = tg.history(chat_id, HISTORY_LIMIT).await;
             let _ = this.update(cx, |app, cx| {
                 if app.selected_chat != Some(chat_id) {
@@ -247,6 +268,7 @@ impl FrillogramApp {
                         history.extend(arrived);
                         app.messages = history;
                         app.rethread();
+                        app.view_messages(chat_id, app.messages.iter().map(|m| m.id).collect(), cx);
                     }
                     Err(error) => app.error = Some(error),
                 }
@@ -255,6 +277,15 @@ impl FrillogramApp {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Marks messages of the open chat read on Telegram.
+    fn view_messages(&self, chat_id: i64, message_ids: Vec<i64>, cx: &mut Context<Self>) {
+        let Some(tg) = self.tg else { return };
+        cx.background_spawn(async move {
+            let _ = tg.view_messages(chat_id, message_ids).await;
+        })
+        .detach();
     }
 
     pub(crate) fn open_thread(&mut self, root_id: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
@@ -276,10 +307,14 @@ impl FrillogramApp {
         let reply_to = if in_thread { self.open_thread } else { None };
         input.update(cx, |input, cx| input.set_value("", window, cx));
 
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = tg.send_text(chat_id, text, reply_to).await {
-                let _ = this.update(cx, |app, cx| {
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = tg.send_text(chat_id, text.clone(), reply_to).await {
+                let _ = this.update_in(cx, |app, window, cx| {
                     app.error = Some(error);
+                    // Give the text back unless something new was typed meanwhile.
+                    if input.read(cx).value().is_empty() {
+                        input.update(cx, |input, cx| input.set_value(text, window, cx));
+                    }
                     cx.notify();
                 });
             }
@@ -291,8 +326,14 @@ impl FrillogramApp {
         // Server ids grow over time; sorting keeps parents before replies,
         // which `threads::group` relies on.
         self.messages.sort_by_key(|m| m.id);
-        self.threads = threads::group(&self.messages);
-        self.message_list.reset(self.threads.len());
+        let threads = threads::group(&self.messages);
+        // Only replace the rows that changed, so the list keeps its scroll
+        // position when a message arrives. `reset` is for switching chats.
+        let old = &self.threads;
+        let prefix = old.iter().zip(&threads).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..].iter().rev().zip(threads[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
+        self.message_list.splice(prefix..old.len() - suffix, threads.len() - prefix - suffix);
+        self.threads = threads;
     }
 
     pub(crate) fn sender_name(&self, sender: SenderId) -> String {

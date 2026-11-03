@@ -19,7 +19,7 @@ Telegram apps see a normal reply. Nothing is stored outside Telegram.
 
 ## Run it
 
-You need Rust ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
+You need Rust 1.88 or newer ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
 [my.telegram.org](https://my.telegram.org). [SETUP.md](SETUP.md) walks through getting them, then:
 
 ```sh
@@ -45,8 +45,9 @@ loading older messages, forum topics, packaging.
 
 Frillogram follows Telegram's [API Terms of Service](https://core.telegram.org/api/terms): every user
 brings their own `api_id`, the name doesn't use "Telegram" and the logo isn't used, and core behavior
-(read receipts, online status, self-destructing messages) is left as Telegram intends. If channel
-viewing is added, it has to show Telegram's sponsored messages.
+(read receipts, online status, self-destructing messages) is left as Telegram intends. Channels are
+hidden from the chat list for now: a client that shows channels has to show Telegram's sponsored
+messages, and Frillogram doesn't yet.
 
 ## License
 

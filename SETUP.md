@@ -25,7 +25,7 @@ issues, or put it in screenshots.
 
 ## 2. Run Frillogram
 
-You need Rust ([rustup.rs](https://rustup.rs)). Pass the credentials as environment variables:
+You need Rust 1.88 or newer ([rustup.rs](https://rustup.rs)). Pass the credentials as environment variables:
 
 ```sh
 FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef cargo run
@@ -55,18 +55,21 @@ cargo run
 
 ## 3. Log in
 
-Frillogram asks for your phone number, then the login code Telegram sends to your other devices, then your
-two-step verification password if you have one set.
+Frillogram asks for your phone number, then the login code, then your two-step verification password if
+you have one set. Telegram usually sends the code as a message to your Telegram app on another device; if
+you aren't logged in anywhere else, it may come by SMS or a phone call instead. The login screen says
+which.
 
 ## Where data is kept
 
-TDLib's database (your login session and message cache) lives in
+TDLib's database (your login session and message cache) lives in a `tdlib` folder inside
 `~/Library/Application Support/frillogram` on macOS and `~/.local/share/frillogram` on Linux. Set
-`FRILLOGRAM_DATA_DIR` to keep it somewhere else, for example a separate folder for a second account or
-for testing. It isn't encrypted yet. Deleting the folder logs you out of Frillogram on this machine.
+`FRILLOGRAM_DATA_DIR` to use another folder instead of `frillogram`, for example a separate one for a
+second account or for testing; the `tdlib` folder is created inside it. It isn't encrypted yet. Deleting
+the `tdlib` folder logs you out of Frillogram on this machine.
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `FRILLOGRAM_API_ID` | yes | Your app's `api_id` from my.telegram.org. |
 | `FRILLOGRAM_API_HASH` | yes | Your app's `api_hash` from my.telegram.org. |
-| `FRILLOGRAM_DATA_DIR` | no | Where to keep TDLib's database instead of the default above. |
+| `FRILLOGRAM_DATA_DIR` | no | The folder to keep TDLib's database in (under `tdlib/`) instead of the default above. |

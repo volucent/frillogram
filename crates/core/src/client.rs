@@ -5,11 +5,22 @@ use tdlib_rs::{enums, functions, types};
 use crate::{Event, Msg};
 
 /// Telegram API credentials and where TDLib keeps its database.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub api_id: i32,
     pub api_hash: String,
     pub data_dir: PathBuf,
+}
+
+// `api_hash` is a secret, so it never shows up in logs.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("api_id", &self.api_id)
+            .field("api_hash", &"<redacted>")
+            .field("data_dir", &self.data_dir)
+            .finish()
+    }
 }
 
 impl Config {
@@ -90,10 +101,14 @@ impl Telegram {
         functions::load_chats(Some(enums::ChatList::Main), limit, self.id).await.map_err(message)
     }
 
-    /// Tells TDLib the chat is on screen, so it sends updates for it and
-    /// marks messages read as they're viewed.
+    /// Tells TDLib the chat is on screen, so it sends updates for it.
     pub async fn open_chat(self, chat_id: i64) -> Result<(), String> {
         functions::open_chat(chat_id, self.id).await.map_err(message)
+    }
+
+    /// Tells TDLib these messages are on screen, which marks them read.
+    pub async fn view_messages(self, chat_id: i64, message_ids: Vec<i64>) -> Result<(), String> {
+        functions::view_messages(chat_id, message_ids, None, false, self.id).await.map_err(message)
     }
 
     pub async fn close_chat(self, chat_id: i64) -> Result<(), String> {
