@@ -78,7 +78,8 @@ impl FrillogramApp {
             );
         }
         h_flex()
-            .id(ElementId::Name(format!("chat-{chat_id}").into()))
+            // The cast wraps negative (group) ids, which keeps them distinct.
+            .id(("chat", chat_id as u64))
             // A list item is laid out on its own, so it has to ask for the full width.
             .w_full()
             .gap_3()
@@ -170,7 +171,7 @@ impl FrillogramApp {
             let label = if count == 1 { "1 reply".to_string() } else { format!("{count} replies") };
             row = row.child(
                 h_flex()
-                    .id(ElementId::Name(format!("thread-{root_id}").into()))
+                    .id(("thread", root_id as u64))
                     .ml(px(44.))
                     .gap_2()
                     .text_sm()
@@ -187,7 +188,7 @@ impl FrillogramApp {
             // A message without replies starts a thread from a link shown on hover.
             row = row.child(
                 div()
-                    .id(ElementId::Name(format!("reply-in-thread-{root_id}").into()))
+                    .id(("reply-in-thread", root_id as u64))
                     .absolute()
                     .top_1p5()
                     .right_4()

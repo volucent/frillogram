@@ -57,7 +57,9 @@ You can also pass them inline, but then the `api_hash` lands in your shell histo
 FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef cargo run
 ```
 
-The first build downloads a prebuilt TDLib and links it into the binary, and takes a few minutes.
+The first build downloads a prebuilt TDLib from the
+[tdlib-rs project's GitHub releases](https://github.com/FedericoBruzzone/tdlib-rs/releases) and links it into
+the binary, and takes a few minutes.
 
 ### Linux prerequisites
 
@@ -84,11 +86,15 @@ which.
 TDLib's database (your login session and message cache) lives in a `tdlib` folder inside
 `~/Library/Application Support/frillogram` on macOS and `~/.local/share/frillogram` on Linux. Set
 `FRILLOGRAM_DATA_DIR` to use another folder instead of `frillogram`, for example a separate one for a
-second account or for testing; the `tdlib` folder is created inside it. It isn't encrypted yet. Deleting
-the `tdlib` folder logs you out of Frillogram on this machine.
+second account or for testing; the `tdlib` folder is created inside it. Use an absolute path outside the
+repository, so the session never ends up in a commit and doesn't depend on where you launch from. It isn't
+encrypted yet.
+
+Deleting the `tdlib` folder only logs you out locally: the session stays active on Telegram's side. To end
+it, terminate it in another Telegram app under **Settings → Devices**.
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `FRILLOGRAM_API_ID` | yes | Your app's `api_id` from my.telegram.org. |
 | `FRILLOGRAM_API_HASH` | yes | Your app's `api_hash` from my.telegram.org. |
-| `FRILLOGRAM_DATA_DIR` | no | The folder to keep TDLib's database in (under `tdlib/`) instead of the default above. |
+| `FRILLOGRAM_DATA_DIR` | no | An absolute path outside the repository to keep TDLib's database in (under `tdlib/`) instead of the default above. |

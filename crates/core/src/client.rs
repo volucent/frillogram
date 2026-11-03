@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tdlib_rs::{enums, functions, types};
 
-use crate::{Event, Msg};
+use crate::{AuthStep, Event, Msg};
 
 /// Telegram API credentials and where TDLib keeps its database.
 #[derive(Clone)]
@@ -32,8 +32,11 @@ impl Config {
             .map_err(|_| "FRILLOGRAM_API_ID is not set".to_string())?
             .parse()
             .map_err(|_| "FRILLOGRAM_API_ID must be a number".to_string())?;
-        let api_hash =
-            std::env::var("FRILLOGRAM_API_HASH").map_err(|_| "FRILLOGRAM_API_HASH is not set".to_string())?;
+        // An empty hash usually means a failed `$(pass …)`, so it counts as unset.
+        let api_hash = std::env::var("FRILLOGRAM_API_HASH")
+            .ok()
+            .filter(|hash| !hash.trim().is_empty())
+            .ok_or("FRILLOGRAM_API_HASH is not set")?;
         let data_dir = match std::env::var_os("FRILLOGRAM_DATA_DIR") {
             Some(dir) => PathBuf::from(dir),
             None => dirs::data_local_dir().ok_or("no local data directory on this system")?.join("frillogram"),
@@ -58,23 +61,33 @@ impl Telegram {
         std::thread::Builder::new()
             .name("tdlib-receive".into())
             .spawn(move || {
+                let events = tx.clone();
                 // `receive` blocks for up to 2s and also resolves pending
                 // requests, so it must never wait on a request itself.
                 // It keeps running after the event receiver is dropped, so
                 // requests still in flight resolve; updates are then discarded.
-                let mut forwarding = true;
-                loop {
-                    let Some((update, _)) = tdlib_rs::receive() else { continue };
-                    if !forwarding {
-                        continue;
+                let receive = std::panic::AssertUnwindSafe(move || {
+                    let mut forwarding = true;
+                    loop {
+                        let Some((update, _)) = tdlib_rs::receive() else { continue };
+                        if !forwarding {
+                            continue;
+                        }
+                        if let enums::Update::AuthorizationState(u) = &update
+                            && matches!(u.authorization_state, enums::AuthorizationState::WaitTdlibParameters)
+                        {
+                            send_parameters(id, config.clone(), events.clone());
+                        }
+                        let Some(event) = Event::from_update(update) else { continue };
+                        forwarding = events.send_blocking(event).is_ok();
                     }
-                    if let enums::Update::AuthorizationState(u) = &update
-                        && matches!(u.authorization_state, enums::AuthorizationState::WaitTdlibParameters)
-                    {
-                        send_parameters(id, config.clone(), tx.clone());
-                    }
-                    let Some(event) = Event::from_update(update) else { continue };
-                    forwarding = tx.send_blocking(event).is_ok();
+                });
+                // tdlib-rs panics on JSON it can't parse. Nothing would answer
+                // requests after that, so tell the UI instead of hanging.
+                if std::panic::catch_unwind(receive).is_err() {
+                    let error = "TDLib stopped unexpectedly. Restart Frillogram to reconnect.";
+                    let _ = tx.send_blocking(Event::Error(error.into()));
+                    let _ = tx.send_blocking(Event::Auth(AuthStep::Closed));
                 }
             })
             .expect("failed to spawn the TDLib receive thread");

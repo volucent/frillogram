@@ -35,8 +35,13 @@ pub struct FrillogramApp {
     /// Ids of the chats shown in the chat list, in display order. Kept here
     /// so the list isn't filtered and sorted on every frame.
     pub(crate) visible_chats: Vec<i64>,
+    /// `visible_chats` is out of date. Chat updates arrive by the thousand
+    /// after login, so it's rebuilt once before the next render, not per update.
+    chats_dirty: bool,
     pub(crate) user_names: HashMap<i64, String>,
     pub(crate) selected_chat: Option<i64>,
+    /// Unsent composer text of chats other than the selected one.
+    drafts: HashMap<i64, String>,
     /// Bumped by each `select_chat`, so a slower, older load can tell it's
     /// been superseded and leave the newer one's state alone.
     load_generation: u64,
@@ -136,8 +141,10 @@ impl FrillogramApp {
             password_input,
             chats: HashMap::new(),
             visible_chats: Vec::new(),
+            chats_dirty: false,
             user_names: HashMap::new(),
             selected_chat: None,
+            drafts: HashMap::new(),
             load_generation: 0,
             load_failed: false,
             messages: Vec::new(),
@@ -181,7 +188,7 @@ impl FrillogramApp {
             }
             Event::Chat(chat) => {
                 self.chats.insert(chat.id, chat);
-                self.visible_chats = visible_chats(&self.chats);
+                self.chats_dirty = true;
             }
             Event::ChatTitle { chat_id, title } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
@@ -192,13 +199,13 @@ impl FrillogramApp {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.last_message = preview;
                     chat.order = order;
-                    self.visible_chats = visible_chats(&self.chats);
+                    self.chats_dirty = true;
                 }
             }
             Event::ChatOrder { chat_id, order } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.order = order;
-                    self.visible_chats = visible_chats(&self.chats);
+                    self.chats_dirty = true;
                 }
             }
             Event::ChatUnread { chat_id, unread } => {
@@ -254,7 +261,12 @@ impl FrillogramApp {
     pub(crate) fn submit_login(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(tg) = self.tg else { return };
         let Some(input) = self.login_input(&self.auth) else { return };
-        let value = input.read(cx).value().trim().to_string();
+        let value = input.read(cx).value();
+        // Spaces can be part of a password, so only the phone and code are trimmed.
+        let value = match self.auth {
+            AuthStep::Password { .. } => value.to_string(),
+            _ => value.trim().to_string(),
+        };
         if value.is_empty() || self.busy {
             return;
         }
@@ -299,6 +311,16 @@ impl FrillogramApp {
             return;
         }
         let previous = self.selected_chat.replace(chat_id);
+        // Each chat keeps its own draft, so Enter can't send one chat's
+        // half-typed message to another.
+        if let Some(previous) = previous {
+            let draft = self.composer.read(cx).value().to_string();
+            if !draft.is_empty() {
+                self.drafts.insert(previous, draft);
+            }
+        }
+        let draft = self.drafts.remove(&chat_id).unwrap_or_default();
+        self.composer.update(cx, |input, cx| input.set_value(draft, window, cx));
         self.load_generation += 1;
         let generation = self.load_generation;
         self.load_failed = false;
@@ -415,8 +437,10 @@ impl FrillogramApp {
             if let Err(error) = tg.send_text(chat_id, text.clone(), reply_to).await {
                 let _ = this.update_in(cx, |app, window, cx| {
                     app.error = Some(error);
-                    // Give the text back unless something new was typed meanwhile.
-                    if input.read(cx).value().is_empty() {
+                    // Give the text back only to the composer it came from, and
+                    // only if nothing new was typed there meanwhile.
+                    let same_place = app.selected_chat == Some(chat_id) && (!in_thread || app.open_thread == reply_to);
+                    if same_place && input.read(cx).value().is_empty() {
                         input.update(cx, |input, cx| input.set_value(text, window, cx));
                     }
                     cx.notify();
@@ -473,8 +497,7 @@ impl FrillogramApp {
     }
 
     fn rethread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Server ids grow over time; sorting keeps parents before replies,
-        // which `threads::group` relies on.
+        // Server ids grow over time, so this shows messages oldest first.
         self.messages.sort_by_key(|m| m.id);
         let threads = threads::group(&self.messages);
         // Close the thread panel if its root is gone, so replies can't go to
@@ -542,6 +565,9 @@ fn visible_chats(chats: &HashMap<i64, ChatSummary>) -> Vec<i64> {
 
 impl Render for FrillogramApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.chats_dirty) {
+            self.visible_chats = visible_chats(&self.chats);
+        }
         let body = if let Some(error) = &self.setup_error {
             self.render_setup(error.clone(), cx).into_any_element()
         } else if self.auth == AuthStep::Ready {
