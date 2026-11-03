@@ -508,8 +508,7 @@ impl FrillogramApp {
             if let Err(error) = tg.send_text(chat_id, text.clone(), reply_to).await {
                 let _ = this.update_in(cx, |app, window, cx| {
                     let selected = app.selected_chat == Some(chat_id);
-                    // The root was already sent, so its id hasn't changed since.
-                    let thread_open = reply_to.is_some() && app.open_thread == reply_to;
+                    let thread_open = reply_thread_open(reply_to, app.open_thread, &app.threads, &app.messages);
                     match restore_target(selected, in_thread, thread_open) {
                         Restore::Composer => restore_failed_text(&input, text, window, cx),
                         Restore::Drop => {}
@@ -664,6 +663,13 @@ fn restore_target(chat_selected: bool, in_thread: bool, thread_open: bool) -> Re
     }
 }
 
+/// Whether the thread holding the reply target `reply_to` is still the open one.
+/// The panel may have followed its root into an older thread since the send,
+/// so this compares thread roots. A target that's no longer loaded is in none.
+fn reply_thread_open(reply_to: Option<i64>, open_thread: Option<i64>, threads: &[Thread], messages: &[Msg]) -> bool {
+    reply_to.and_then(|id| thread_root_of(id, threads, messages)).is_some_and(|root| open_thread == Some(root))
+}
+
 /// Adds `text` to `chat_id`'s draft, after whatever was typed there since.
 fn park_draft(drafts: &mut HashMap<i64, String>, chat_id: i64, text: &str) {
     let draft = drafts.entry(chat_id).or_default();
@@ -803,8 +809,8 @@ mod tests {
     use frillogram_core::{ChatSummary, Msg, SendState, SenderId, threads};
 
     use super::{
-        ErrorBanner, Restore, appendix, changed_rows, park_draft, restore_target, row_keys, settle_open,
-        thread_root_of, visible_chats,
+        ErrorBanner, Restore, appendix, changed_rows, park_draft, reply_thread_open, restore_target, row_keys,
+        settle_open, thread_root_of, visible_chats,
     };
 
     #[test]
@@ -873,6 +879,29 @@ mod tests {
         assert_eq!(thread_root_of(1, &threads, &after), Some(1));
         // A deleted root closes the panel.
         assert_eq!(thread_root_of(3, &threads, &after), None);
+    }
+
+    #[test]
+    fn failed_reply_finds_its_thread_after_the_root_moved() {
+        let msg = |id: i64, reply_to: Option<i64>| Msg {
+            id,
+            chat_id: 1,
+            sender: SenderId::User(1),
+            date: 0,
+            text: String::new(),
+            reply_to,
+            outgoing: false,
+            send_state: SendState::Sent,
+        };
+        // The reply went to 5, then history brought in 2 and moved the thread to root 2.
+        let messages = [msg(1, None), msg(2, None), msg(5, Some(2)), msg(6, Some(5))];
+        let threads = threads::group(&messages);
+        assert!(reply_thread_open(Some(5), Some(2), &threads, &messages));
+        // Another thread is open, or none, or the reply target is gone.
+        assert!(!reply_thread_open(Some(5), Some(1), &threads, &messages));
+        assert!(!reply_thread_open(Some(5), None, &threads, &messages));
+        assert!(!reply_thread_open(Some(3), None, &threads, &messages));
+        assert!(!reply_thread_open(None, None, &threads, &messages));
     }
 
     #[test]
