@@ -8,5 +8,4 @@ license.workspace = true
 [dependencies]
 frillogram-core.workspace = true
 gpui-kit = "0.9.0"
-async-channel = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

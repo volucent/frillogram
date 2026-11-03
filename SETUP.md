@@ -25,16 +25,11 @@ issues, or put it in screenshots.
 
 ## 2. Run Frillogram
 
-You need Rust 1.88 or newer ([rustup.rs](https://rustup.rs)). Pass the credentials as environment variables:
+You need Rust 1.92 or newer ([rustup.rs](https://rustup.rs)); on Linux, also the packages under
+[Linux prerequisites](#linux-prerequisites). Frillogram reads the credentials from environment variables.
 
-```sh
-FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef cargo run
-```
-
-The first build downloads a prebuilt TDLib and links it into the binary, and takes a few minutes.
-
-To avoid typing them each time, keep them in a password manager and read them when launching, for example
-with [`pass`](https://www.passwordstore.org):
+Keep them in a password manager and read them when launching, for example with
+[`pass`](https://www.passwordstore.org):
 
 ```sh
 pass insert frillogram/api_id
@@ -42,16 +37,39 @@ pass insert frillogram/api_hash
 FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogram/api_hash) cargo run
 ```
 
-Or put them in a `.env` file in the repository root (it's in `.gitignore`) and load it into your shell:
+Or put them in a `.env` file in the repository root (it's in `.gitignore`), readable only by you, and load
+it into your shell:
 
 ```sh
 cat > .env <<'EOF'
 FRILLOGRAM_API_ID=12345
 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef
 EOF
+chmod 600 .env
 set -a; source .env; set +a
 cargo run
 ```
+
+You can also pass them inline, but then the `api_hash` lands in your shell history:
+
+```sh
+FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef cargo run
+```
+
+The first build downloads a prebuilt TDLib and links it into the binary, and takes a few minutes.
+
+### Linux prerequisites
+
+The Linux build hasn't been verified yet. TDLib is linked against LLVM's libc++, and GPUI's X11/Wayland
+backend links libxcb, xkbcommon and fontconfig. On Debian or Ubuntu:
+
+```sh
+sudo apt install build-essential pkg-config libc++-dev libc++abi-dev \
+  libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig-dev libfreetype-dev
+```
+
+At runtime GPUI renders through Vulkan (`libvulkan1` plus your GPU's driver, e.g. `mesa-vulkan-drivers`)
+and loads `libwayland-client` when running under Wayland.
 
 ## 3. Log in
 

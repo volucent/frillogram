@@ -15,11 +15,12 @@ to it (directly or through other replies) form one thread. The chat shows each t
 with a "N replies" link, and the thread opens in a side panel.
 
 Replying in a thread sends an ordinary Telegram reply to the thread's first message, so people on other
-Telegram apps see a normal reply. Nothing is stored outside Telegram.
+Telegram apps see a normal reply. Frillogram adds no storage of its own; TDLib keeps your session and a
+message cache on this machine (see [where data is kept](SETUP.md#where-data-is-kept)).
 
 ## Run it
 
-You need Rust 1.88 or newer ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
+You need Rust 1.92 or newer ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
 [my.telegram.org](https://my.telegram.org). [SETUP.md](SETUP.md) walks through getting them, then:
 
 ```sh

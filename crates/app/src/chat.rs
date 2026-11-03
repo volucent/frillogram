@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use frillogram_core::{ChatSummary, Msg, SenderId};
+use frillogram_core::{ChatSummary, Msg, SendState, SenderId};
 use gpui_kit::{
     component::{
         ActiveTheme,
@@ -214,16 +214,25 @@ impl FrillogramApp {
         let sender_id = match message.sender {
             SenderId::User(id) | SenderId::Chat(id) => id,
         };
+        let (muted, danger) = (cx.theme().muted_foreground, cx.theme().danger);
         h_flex().items_start().gap_3().py_1().child(avatar(&name, sender_id)).child(
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .child(
-                    h_flex().gap_2().child(div().font_weight(FontWeight::BOLD).child(name)).child(
-                        div().text_xs().text_color(cx.theme().muted_foreground).child(format_time(message.date)),
-                    ),
+                    h_flex()
+                        .gap_2()
+                        .child(div().font_weight(FontWeight::BOLD).child(name))
+                        .child(div().text_xs().text_color(muted).child(format_time(message.date)))
+                        .when(message.send_state == SendState::Failed, |header| {
+                            header.child(div().text_xs().text_color(danger).child("Not sent"))
+                        }),
                 )
-                .child(div().child(message.text.clone())),
+                .child(
+                    div()
+                        .when(message.send_state == SendState::Pending, |text| text.text_color(muted))
+                        .child(message.text.clone()),
+                ),
         )
     }
 }

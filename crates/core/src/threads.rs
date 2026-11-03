@@ -56,7 +56,7 @@ fn root_of(mut i: usize, messages: &[Msg], index_of: &HashMap<i64, usize>) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SenderId;
+    use crate::{SendState, SenderId};
 
     fn msg(id: i64, reply_to: Option<i64>) -> Msg {
         Msg {
@@ -67,6 +67,7 @@ mod tests {
             text: format!("m{id}"),
             reply_to,
             outgoing: false,
+            send_state: SendState::Sent,
         }
     }
 

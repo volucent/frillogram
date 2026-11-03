@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tdlib_rs::{enums, functions, types};
 
@@ -95,10 +95,18 @@ impl Telegram {
         functions::check_authentication_password(password, self.id).await.map_err(message)
     }
 
-    /// Asks TDLib to deliver up to `limit` more chats of the main list as
-    /// [`Event::Chat`] updates.
+    /// Asks TDLib to deliver every chat of the main list as [`Event::Chat`]
+    /// updates, `limit` per request.
     pub async fn load_chats(self, limit: i32) -> Result<(), String> {
-        functions::load_chats(Some(enums::ChatList::Main), limit, self.id).await.map_err(message)
+        // A request may load fewer chats than asked for while more remain;
+        // only "Not Found" (404) means the list is exhausted.
+        loop {
+            match functions::load_chats(Some(enums::ChatList::Main), limit, self.id).await {
+                Ok(()) => {}
+                Err(error) if error.code == 404 => return Ok(()),
+                Err(error) => return Err(message(error)),
+            }
+        }
     }
 
     /// Tells TDLib the chat is on screen, so it sends updates for it.
@@ -122,7 +130,8 @@ impl Telegram {
         // TDLib returns whatever it has locally first, often a single
         // message, so keep asking until the limit or the start of the chat.
         while messages.len() < limit {
-            let want = (limit - messages.len()) as i32;
+            // TDLib returns at most 100 messages per request.
+            let want = (limit - messages.len()).min(100) as i32;
             let enums::Messages::Messages(batch) =
                 functions::get_chat_history(chat_id, from, 0, want, false, self.id).await.map_err(message)?;
             let batch: Vec<types::Message> = batch.messages.into_iter().flatten().collect();
@@ -157,6 +166,10 @@ impl Telegram {
 /// thread because the receive thread has to keep running to resolve it.
 fn send_parameters(id: i32, config: Config, tx: async_channel::Sender<Event>) {
     std::thread::spawn(move || {
+        if let Err(error) = create_private_dir(&config.data_dir) {
+            let _ = tx.send_blocking(Event::Error(format!("Can't create {}: {error}", config.data_dir.display())));
+            return;
+        }
         let result = futures_executor::block_on(functions::set_tdlib_parameters(
             false,
             config.data_dir.join("db").to_string_lossy().into_owned(),
@@ -178,6 +191,20 @@ fn send_parameters(id: i32, config: Config, tx: async_channel::Sender<Event>) {
             let _ = tx.send_blocking(Event::Error(error.message));
         }
     });
+}
+
+/// Creates `dir` readable only by the current user, since TDLib's database
+/// in it isn't encrypted.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        // Also tightens a directory created before this was in place.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
 }
 
 fn message(error: types::Error) -> String {

@@ -3,7 +3,7 @@ use gpui_kit::{
     component::{
         ActiveTheme, Disableable,
         button::{Button, ButtonVariants},
-        input::Input,
+        input::{Input, InputState},
         v_flex,
     },
     *,
@@ -72,13 +72,18 @@ impl FrillogramApp {
     }
 
     pub(crate) fn focus_login_input(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = match self.auth {
-            AuthStep::Phone => &self.phone_input,
-            AuthStep::Code { .. } => &self.code_input,
-            AuthStep::Password { .. } => &self.password_input,
-            _ => return,
-        };
+        let Some(input) = self.login_input(&self.auth) else { return };
         input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// The input that answers `step`, if it asks for one.
+    pub(crate) fn login_input(&self, step: &AuthStep) -> Option<&Entity<InputState>> {
+        match step {
+            AuthStep::Phone => Some(&self.phone_input),
+            AuthStep::Code { .. } => Some(&self.code_input),
+            AuthStep::Password { .. } => Some(&self.password_input),
+            _ => None,
+        }
     }
 }
 

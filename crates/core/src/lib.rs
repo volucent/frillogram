@@ -6,4 +6,4 @@ mod model;
 pub mod threads;
 
 pub use client::{Config, Telegram};
-pub use model::{AuthStep, ChatSummary, Event, Msg, SenderId};
+pub use model::{AuthStep, ChatSummary, Event, Msg, SendState, SenderId};

@@ -14,7 +14,7 @@ use gpui_kit::{
 
 /// How many recent messages to load when a chat is opened.
 const HISTORY_LIMIT: usize = 100;
-/// How many chats to ask TDLib for after login.
+/// How many chats to ask TDLib for per request after login.
 const CHAT_LIMIT: i32 = 200;
 
 pub struct FrillogramApp {
@@ -34,6 +34,9 @@ pub struct FrillogramApp {
     pub(crate) selected_chat: Option<i64>,
     /// Messages of the selected chat, oldest first.
     pub(crate) messages: Vec<Msg>,
+    /// Message changes seen while the selected chat's history loads, replayed
+    /// onto it once it arrives. `None` when no history is loading.
+    changes_while_loading: Option<Vec<Event>>,
     pub(crate) threads: Vec<Thread>,
     /// Root message id of the thread shown in the side panel.
     pub(crate) open_thread: Option<i64>,
@@ -102,6 +105,7 @@ impl FrillogramApp {
             user_names: HashMap::new(),
             selected_chat: None,
             messages: Vec::new(),
+            changes_while_loading: None,
             threads: Vec::new(),
             open_thread: None,
             message_list: ListState::new(0, ListAlignment::Bottom, px(600.)),
@@ -118,7 +122,14 @@ impl FrillogramApp {
                 if step == AuthStep::Ready && self.auth != AuthStep::Ready {
                     self.load_chats(cx);
                 }
-                self.auth = step;
+                let previous = std::mem::replace(&mut self.auth, step);
+                // Clear an answered step's input, so the login code and
+                // password don't stay in widget state.
+                if std::mem::discriminant(&previous) != std::mem::discriminant(&self.auth)
+                    && let Some(input) = self.login_input(&previous).cloned()
+                {
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                }
                 self.busy = false;
                 self.focus_login_input(window, cx);
             }
@@ -133,9 +144,7 @@ impl FrillogramApp {
             Event::ChatLastMessage { chat_id, preview, order } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.last_message = preview;
-                    if let Some(order) = order {
-                        chat.order = order;
-                    }
+                    chat.order = order;
                 }
             }
             Event::ChatOrder { chat_id, order } => {
@@ -155,19 +164,19 @@ impl FrillogramApp {
                     self.rethread();
                 }
             }
-            Event::MessageSent { old_id, message } => {
-                if let Some(pending) = self.messages.iter_mut().find(|m| m.id == old_id) {
-                    *pending = message;
+            Event::MessageSent { .. }
+            | Event::MessageSendFailed { .. }
+            | Event::MessagesDeleted { .. }
+            | Event::MessageText { .. } => {
+                if let Event::MessageSendFailed { error, .. } = &event {
+                    self.error = Some(error.clone());
+                }
+                if self.apply_message_change(&event) {
                     self.rethread();
                 }
-            }
-            Event::MessageSendFailed { old_id, error } => {
-                let count = self.messages.len();
-                self.messages.retain(|m| m.id != old_id);
-                if self.messages.len() != count {
-                    self.rethread();
+                if let Some(changes) = &mut self.changes_while_loading {
+                    changes.push(event);
                 }
-                self.error = Some(error);
             }
             Event::User { id, name } => {
                 self.user_names.insert(id, name);
@@ -179,12 +188,7 @@ impl FrillogramApp {
 
     pub(crate) fn submit_login(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(tg) = self.tg else { return };
-        let input = match self.auth {
-            AuthStep::Phone => &self.phone_input,
-            AuthStep::Code { .. } => &self.code_input,
-            AuthStep::Password { .. } => &self.password_input,
-            _ => return,
-        };
+        let Some(input) = self.login_input(&self.auth) else { return };
         let value = input.read(cx).value().trim().to_string();
         if value.is_empty() || self.busy {
             return;
@@ -214,10 +218,7 @@ impl FrillogramApp {
     fn load_chats(&mut self, cx: &mut Context<Self>) {
         let Some(tg) = self.tg else { return };
         cx.spawn(async move |this, cx| {
-            // "Not Found" only means every chat is already loaded.
-            if let Err(error) = tg.load_chats(CHAT_LIMIT).await
-                && error != "Not Found"
-            {
+            if let Err(error) = tg.load_chats(CHAT_LIMIT).await {
                 let _ = this.update(cx, |app, cx| {
                     app.error = Some(error);
                     cx.notify();
@@ -234,6 +235,7 @@ impl FrillogramApp {
         }
         let previous = self.selected_chat.replace(chat_id);
         self.messages.clear();
+        self.changes_while_loading = Some(Vec::new());
         self.threads.clear();
         self.message_list.reset(0);
         self.open_thread = None;
@@ -267,10 +269,17 @@ impl FrillogramApp {
                             app.messages.drain(..).filter(|m| !history.iter().any(|h| h.id == m.id)).collect();
                         history.extend(arrived);
                         app.messages = history;
+                        // Changes that came in after the fetch may not be in it.
+                        for change in app.changes_while_loading.take().unwrap_or_default() {
+                            app.apply_message_change(&change);
+                        }
                         app.rethread();
                         app.view_messages(chat_id, app.messages.iter().map(|m| m.id).collect(), cx);
                     }
-                    Err(error) => app.error = Some(error),
+                    Err(error) => {
+                        app.changes_while_loading = None;
+                        app.error = Some(error);
+                    }
                 }
                 cx.notify();
             });
@@ -320,6 +329,41 @@ impl FrillogramApp {
             }
         })
         .detach();
+    }
+
+    /// Applies a sent, failed, deleted or edited message to the selected
+    /// chat's messages, and returns whether they changed. Applying the same
+    /// change twice is harmless, which replaying after a history load relies on.
+    fn apply_message_change(&mut self, event: &Event) -> bool {
+        let selected = |chat_id: i64| self.selected_chat == Some(chat_id);
+        match event {
+            Event::MessageSent { old_id, message } | Event::MessageSendFailed { old_id, message, .. }
+                if selected(message.chat_id) =>
+            {
+                let Some(index) = self.messages.iter().position(|m| m.id == *old_id) else { return false };
+                if self.messages.iter().any(|m| m.id == message.id) {
+                    self.messages.remove(index);
+                } else {
+                    self.messages[index] = message.clone();
+                }
+                true
+            }
+            Event::MessagesDeleted { chat_id, message_ids } if selected(*chat_id) => {
+                let count = self.messages.len();
+                self.messages.retain(|m| !message_ids.contains(&m.id));
+                self.messages.len() != count
+            }
+            Event::MessageText { chat_id, message_id, text } if selected(*chat_id) => {
+                match self.messages.iter_mut().find(|m| m.id == *message_id) {
+                    Some(message) if message.text != *text => {
+                        message.text = text.clone();
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
     }
 
     fn rethread(&mut self) {
