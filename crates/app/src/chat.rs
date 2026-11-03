@@ -134,7 +134,7 @@ impl FrillogramApp {
 
     /// The last error, if any, with a button to dismiss it.
     fn render_error(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let error = self.error.clone()?;
+        let error = self.error.text()?;
         Some(
             h_flex()
                 .px_4()
@@ -145,9 +145,12 @@ impl FrillogramApp {
                 .child(div().flex_1().min_w_0().child(error))
                 .child(Button::new("dismiss-error").ghost().label("Dismiss").on_click(cx.listener(
                     |this, _, window, cx| {
-                        this.error = None;
-                        // Clicking moved focus to this button, which is now gone.
-                        if this.selected_chat.is_some() {
+                        this.error.clear();
+                        // Clicking moved focus to this button, which is now
+                        // gone. The thread composer only shows for a sent root.
+                        if this.thread_composer_focused_last && this.thread_root_state() == Some(SendState::Sent) {
+                            this.thread_composer.update(cx, |input, cx| input.focus(window, cx));
+                        } else if this.selected_chat.is_some() {
                             this.composer.update(cx, |input, cx| input.focus(window, cx));
                         }
                         cx.notify();

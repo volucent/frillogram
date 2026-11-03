@@ -79,8 +79,8 @@ impl FrillogramApp {
                     .on_click(cx.listener(|this, _, window, cx| this.submit_login(window, cx))),
             );
         }
-        if let Some(error) = &self.error {
-            card = card.child(div().text_color(cx.theme().danger).child(error.clone()));
+        if let Some(error) = self.error.text() {
+            card = card.child(div().text_color(cx.theme().danger).child(error));
         }
         centered(card)
     }

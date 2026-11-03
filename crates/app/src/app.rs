@@ -24,10 +24,7 @@ pub struct FrillogramApp {
     /// Set when the app can't start at all, e.g. API credentials are missing.
     pub(crate) setup_error: Option<ConfigError>,
     pub(crate) auth: AuthStep,
-    pub(crate) error: Option<String>,
-    /// The chat `error` is about, if any. Switching chats hides only such
-    /// errors, so e.g. a failed chat list load stays visible.
-    error_chat: Option<i64>,
+    pub(crate) error: ErrorBanner,
     pub(crate) busy: bool,
 
     pub(crate) phone_input: Entity<InputState>,
@@ -47,10 +44,16 @@ pub struct FrillogramApp {
     drafts: HashMap<i64, String>,
     /// Errors about sends from chats that were no longer selected when they
     /// failed, shown when the user comes back to them.
-    pending_errors: HashMap<i64, String>,
+    pending_errors: HashMap<i64, Vec<String>>,
     /// Bumped by each `select_chat`, so a slower, older load can tell it's
     /// been superseded and leave the newer one's state alone.
     load_generation: u64,
+    /// The chat this client holds open on TDLib, which counts `openChat` per
+    /// chat and sends its updates until as many `closeChat`s came in. Set
+    /// once the current load's `open_chat` succeeds and closed by the next
+    /// `select_chat`; a superseded load closes its own instead. So every
+    /// successful `open_chat` is closed exactly once.
+    opened_chat: Option<i64>,
     /// The selected chat's history failed to load, so picking it again retries.
     load_failed: bool,
     /// Messages of the selected chat, oldest first.
@@ -67,6 +70,9 @@ pub struct FrillogramApp {
     pub(crate) thread_scroll: ScrollHandle,
     pub(crate) composer: Entity<TextareaState>,
     pub(crate) thread_composer: Entity<TextareaState>,
+    /// The thread composer had focus last, not the main one, so dismissing
+    /// an error gives focus back to it.
+    pub(crate) thread_composer_focused_last: bool,
 
     _subscriptions: Vec<Subscription>,
     _events: Option<Task<()>>,
@@ -112,11 +118,15 @@ impl FrillogramApp {
             }));
         }
         for (input, in_thread) in [(&composer, false), (&thread_composer, true)] {
-            subscriptions.push(cx.subscribe_in(input, window, move |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    this.send_from_composer(in_thread, window, cx);
-                }
-            }));
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { shift: false, .. } => this.send_from_composer(in_thread, window, cx),
+                    InputEvent::Focus => this.thread_composer_focused_last = in_thread,
+                    _ => {}
+                },
+            ));
         }
 
         let (tg, setup_error, events) = match config {
@@ -140,8 +150,7 @@ impl FrillogramApp {
             tg,
             setup_error,
             auth: AuthStep::Starting,
-            error: None,
-            error_chat: None,
+            error: ErrorBanner::default(),
             busy: false,
             phone_input,
             code_input,
@@ -154,6 +163,7 @@ impl FrillogramApp {
             drafts: HashMap::new(),
             pending_errors: HashMap::new(),
             load_generation: 0,
+            opened_chat: None,
             load_failed: false,
             messages: Vec::new(),
             changes_while_loading: None,
@@ -164,6 +174,7 @@ impl FrillogramApp {
             thread_scroll: ScrollHandle::new(),
             composer,
             thread_composer,
+            thread_composer_focused_last: false,
             _subscriptions: subscriptions,
             _events,
         }
@@ -266,10 +277,10 @@ impl FrillogramApp {
         cx.notify();
     }
 
-    /// Shows `error`, which is about `chat` if that's set.
+    /// Shows `error`, which is about `chat` if that's set, after any errors
+    /// shown already.
     fn show_error(&mut self, error: String, chat: Option<i64>) {
-        self.error = Some(error);
-        self.error_chat = chat;
+        self.error.push(error, chat);
     }
 
     pub(crate) fn submit_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -286,7 +297,7 @@ impl FrillogramApp {
         }
         let step = self.auth.clone();
         self.busy = true;
-        self.error = None;
+        self.error.clear();
         cx.spawn_in(window, async move |this, cx| {
             let result = match step {
                 AuthStep::Phone => tg.submit_phone(value).await,
@@ -328,15 +339,18 @@ impl FrillogramApp {
         }
         let previous = self.selected_chat.replace(chat_id);
         // Each chat keeps its own draft, so Enter can't send one chat's
-        // half-typed message to another.
-        if let Some(previous) = previous {
-            let draft = self.composer.read(cx).value().to_string();
-            if !draft.is_empty() {
-                self.drafts.insert(previous, draft);
+        // half-typed message to another. A retry of a failed load stays in
+        // the same chat, so it leaves the composer, caret included, alone.
+        if previous != Some(chat_id) {
+            if let Some(previous) = previous {
+                let draft = self.composer.read(cx).value().to_string();
+                if !draft.is_empty() {
+                    self.drafts.insert(previous, draft);
+                }
             }
+            let draft = self.drafts.remove(&chat_id).unwrap_or_default();
+            restore_text(&self.composer, draft, window, cx);
         }
-        let draft = self.drafts.remove(&chat_id).unwrap_or_default();
-        restore_text(&self.composer, draft, window, cx);
         self.load_generation += 1;
         let generation = self.load_generation;
         self.load_failed = false;
@@ -347,17 +361,18 @@ impl FrillogramApp {
         self.message_list.reset(0);
         self.open_thread = None;
         self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
-        if self.error_chat.take().is_some() {
-            self.error = None;
-        }
-        if let Some(error) = self.pending_errors.remove(&chat_id) {
+        self.error.clear_chat();
+        for error in self.pending_errors.remove(&chat_id).unwrap_or_default() {
             self.show_error(error, Some(chat_id));
         }
         self.composer.update(cx, |input, cx| input.focus(window, cx));
+        // Only a chat that was actually opened is closed, so a load that
+        // never got to open its chat can't close one opened elsewhere.
+        let to_close = self.opened_chat.take();
 
         cx.spawn_in(window, async move |this, cx| {
-            if let Some(previous) = previous {
-                let _ = tg.close_chat(previous).await;
+            if let Some(to_close) = to_close {
+                let _ = tg.close_chat(to_close).await;
             }
             // Another click may have started a newer load meanwhile; that one
             // owns the chat state now, even if it's for this same chat.
@@ -366,14 +381,19 @@ impl FrillogramApp {
             if !is_current(cx) {
                 return;
             }
-            let _ = tg.open_chat(chat_id).await;
-            if !is_current(cx) {
-                // Opening it now would leave it open, unless the newer load
-                // picked this chat again and needs it open.
-                let reselected = this.read_with(cx, |app, _| app.selected_chat == Some(chat_id)).unwrap_or(false);
-                if !reselected {
-                    let _ = tg.close_chat(chat_id).await;
-                }
+            // TDLib doesn't count a failed open, so there's nothing to close then.
+            let opened = tg.open_chat(chat_id).await.is_ok();
+            let (current, to_close) = this
+                .update(cx, |app, _| {
+                    let current = app.load_generation == generation;
+                    let to_close = opened.then(|| settle_open(&mut app.opened_chat, chat_id, current)).flatten();
+                    (current, to_close)
+                })
+                .unwrap_or((false, opened.then_some(chat_id)));
+            if let Some(to_close) = to_close {
+                let _ = tg.close_chat(to_close).await;
+            }
+            if !current {
                 return;
             }
             let history = tg.history(chat_id, HISTORY_LIMIT).await;
@@ -487,17 +507,14 @@ impl FrillogramApp {
                     // The root was already sent, so its id hasn't changed since.
                     let thread_open = reply_to.is_some() && app.open_thread == reply_to;
                     match restore_target(selected, in_thread, thread_open) {
-                        // Only if nothing new was typed there meanwhile.
-                        Restore::Composer if input.read(cx).value().is_empty() => {
-                            restore_text(&input, text, window, cx);
-                        }
-                        Restore::Composer | Restore::Drop => {}
+                        Restore::Composer => restore_failed_text(&input, text, window, cx),
+                        Restore::Drop => {}
                         Restore::Draft => park_draft(&mut app.drafts, chat_id, &text),
                     }
                     if selected {
                         app.show_error(error, Some(chat_id));
                     } else {
-                        app.pending_errors.insert(chat_id, error);
+                        push_distinct(app.pending_errors.entry(chat_id).or_default(), error);
                     }
                     cx.notify();
                 });
@@ -599,11 +616,30 @@ fn restore_text(input: &Entity<TextareaState>, text: String, window: &mut Window
     });
 }
 
+/// Puts the text of a failed send back into the composer it came from. Text
+/// typed there meanwhile comes first, as in `park_draft`, and keeps its caret
+/// and selection.
+fn restore_failed_text(input: &Entity<TextareaState>, text: String, window: &mut Window, cx: &mut App) {
+    let current = input.read(cx).value().to_string();
+    if current.is_empty() {
+        return restore_text(input, text, window, cx);
+    }
+    input.update(cx, |input, cx| {
+        let (selection, reversed) = (input.selected_range(), input.is_selection_reversed());
+        let end = input.text().len();
+        input.set_selected_range(end..end, cx);
+        // Inserted rather than set, so it can be undone and the view doesn't
+        // jump back to the top.
+        input.insert(appendix(&current, &text), window, cx);
+        input.set_selected_range_with_direction(selection, reversed, cx);
+    });
+}
+
 /// Where the text of a failed send goes back to. Its error shows either way,
 /// right away or when the user returns to the chat.
 #[derive(Debug, PartialEq)]
 enum Restore {
-    /// The composer it was sent from, if nothing was typed there meanwhile.
+    /// The composer it was sent from, after anything typed there meanwhile.
     Composer,
     /// Its chat's draft, for when that chat is no longer selected.
     Draft,
@@ -626,10 +662,79 @@ fn restore_target(chat_selected: bool, in_thread: bool, thread_open: bool) -> Re
 /// Adds `text` to `chat_id`'s draft, after whatever was typed there since.
 fn park_draft(drafts: &mut HashMap<i64, String>, chat_id: i64, text: &str) {
     let draft = drafts.entry(chat_id).or_default();
-    if !draft.is_empty() {
-        draft.push('\n');
+    let appendix = appendix(draft, text);
+    draft.push_str(&appendix);
+}
+
+/// What to add to `existing` so that `text` follows it on a line of its own.
+fn appendix(existing: &str, text: &str) -> String {
+    if existing.is_empty() { text.to_string() } else { format!("\n{text}") }
+}
+
+/// Settles a load's successful `open_chat`. The current load's chat becomes
+/// `opened_chat`, for the next `select_chat` to close; a superseded load's
+/// chat is returned, to be closed right away.
+fn settle_open(opened_chat: &mut Option<i64>, chat_id: i64, current: bool) -> Option<i64> {
+    if !current {
+        return Some(chat_id);
     }
-    draft.push_str(text);
+    // `select_chat` took the previous one, and only one load is current.
+    debug_assert!(opened_chat.is_none());
+    *opened_chat = Some(chat_id);
+    None
+}
+
+/// The error banner. Errors about a chat hide when the user switches away
+/// from it; the others, e.g. a failed chat list load, stay until dismissed.
+#[derive(Default)]
+pub(crate) struct ErrorBanner {
+    global: Vec<String>,
+    /// Errors about the selected chat, and its id.
+    chat: Option<(i64, Vec<String>)>,
+}
+
+impl ErrorBanner {
+    /// Adds `error`, about `chat` if that's set, after those shown already.
+    fn push(&mut self, error: String, chat: Option<i64>) {
+        let errors = match chat {
+            None => &mut self.global,
+            Some(chat_id) => {
+                let chat = self.chat.get_or_insert_with(|| (chat_id, Vec::new()));
+                // Errors about a chat that isn't selected anymore are stale.
+                if chat.0 != chat_id {
+                    *chat = (chat_id, Vec::new());
+                }
+                &mut chat.1
+            }
+        };
+        push_distinct(errors, error);
+    }
+
+    fn clear_chat(&mut self) {
+        self.chat = None;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The banner's text, global errors first, if there are any.
+    pub(crate) fn text(&self) -> Option<String> {
+        let mut errors: Vec<&str> = Vec::new();
+        for error in self.global.iter().chain(self.chat.iter().flat_map(|(_, errors)| errors)) {
+            if !errors.contains(&error.as_str()) {
+                errors.push(error);
+            }
+        }
+        (!errors.is_empty()).then(|| errors.join("; "))
+    }
+}
+
+/// Adds `error` unless it's there already, so a repeated failure shows once.
+fn push_distinct(errors: &mut Vec<String>, error: String) {
+    if !errors.contains(&error) {
+        errors.push(error);
+    }
 }
 
 /// Identifies a message list row by content: its root id, reply ids and
@@ -684,7 +789,9 @@ mod tests {
 
     use frillogram_core::{ChatSummary, Msg, SendState, SenderId, threads};
 
-    use super::{Restore, changed_rows, park_draft, restore_target, row_keys, visible_chats};
+    use super::{
+        ErrorBanner, Restore, appendix, changed_rows, park_draft, restore_target, row_keys, settle_open, visible_chats,
+    };
 
     #[test]
     fn identical_rows_change_nothing() {
@@ -760,5 +867,148 @@ mod tests {
         assert_eq!(drafts[&1], "first");
         park_draft(&mut drafts, 1, "second");
         assert_eq!(drafts[&1], "first\nsecond");
+    }
+
+    #[test]
+    fn appended_text_goes_on_its_own_line() {
+        assert_eq!(appendix("", "failed"), "failed");
+        assert_eq!(appendix("typed", "failed"), "\nfailed");
+    }
+
+    /// `select_chat`'s open and close calls against TDLib's per-chat open
+    /// count, with each load's steps run when a test says so.
+    #[derive(Default)]
+    struct OpenCounts {
+        opened_chat: Option<i64>,
+        generation: u64,
+        counts: HashMap<i64, i32>,
+    }
+
+    impl OpenCounts {
+        /// `select_chat`, up to and including its close of the previous chat.
+        fn select(&mut self, chat_id: i64) -> (u64, i64) {
+            self.generation += 1;
+            if let Some(chat) = self.opened_chat.take() {
+                self.close(chat);
+            }
+            (self.generation, chat_id)
+        }
+
+        /// The load's `open_chat` and what follows it, or nothing if it was
+        /// superseded before getting there.
+        fn open(&mut self, (generation, chat_id): (u64, i64)) {
+            if generation != self.generation {
+                return;
+            }
+            *self.counts.entry(chat_id).or_default() += 1;
+            self.settle((generation, chat_id));
+        }
+
+        /// Like `open`, but the open resolves only after `later` ran.
+        fn open_around(&mut self, load: (u64, i64), later: impl FnOnce(&mut Self)) {
+            if load.0 != self.generation {
+                return;
+            }
+            *self.counts.entry(load.1).or_default() += 1;
+            later(self);
+            self.settle(load);
+        }
+
+        fn settle(&mut self, (generation, chat_id): (u64, i64)) {
+            let current = generation == self.generation;
+            if let Some(chat) = settle_open(&mut self.opened_chat, chat_id, current) {
+                self.close(chat);
+            }
+        }
+
+        fn close(&mut self, chat_id: i64) {
+            let count = self.counts.entry(chat_id).or_default();
+            // TDLib ignores a close at 0, which would hide an unbalanced one.
+            assert!(*count > 0, "closed chat {chat_id} more often than it was opened");
+            *count -= 1;
+        }
+
+        /// Only `opened_chat` is still open on TDLib.
+        fn assert_balanced(&self) {
+            for (&chat_id, &count) in &self.counts {
+                assert_eq!(count, i32::from(self.opened_chat == Some(chat_id)), "chat {chat_id}");
+            }
+        }
+    }
+
+    #[test]
+    fn switching_chats_closes_the_previous_one() {
+        let mut tdlib = OpenCounts::default();
+        let a = tdlib.select(1);
+        tdlib.open(a);
+        let b = tdlib.select(2);
+        tdlib.open(b);
+        tdlib.assert_balanced();
+        assert_eq!(tdlib.opened_chat, Some(2));
+    }
+
+    #[test]
+    fn superseded_open_is_closed_even_if_its_chat_is_selected_again() {
+        let mut tdlib = OpenCounts::default();
+        let first = tdlib.select(1);
+        tdlib.open_around(first, |tdlib| {
+            let b = tdlib.select(2);
+            let again = tdlib.select(1);
+            tdlib.open(b);
+            tdlib.open(again);
+        });
+        tdlib.assert_balanced();
+        assert_eq!(tdlib.opened_chat, Some(1));
+        let c = tdlib.select(3);
+        tdlib.open(c);
+        tdlib.assert_balanced();
+    }
+
+    #[test]
+    fn load_superseded_before_opening_closes_nothing() {
+        let mut tdlib = OpenCounts::default();
+        let a = tdlib.select(1);
+        let b = tdlib.select(2);
+        tdlib.open(a);
+        tdlib.open(b);
+        // The chat selected before 2 was never opened, so only 2 is closed.
+        let c = tdlib.select(3);
+        tdlib.open(c);
+        tdlib.assert_balanced();
+        assert_eq!(tdlib.counts.get(&1), None);
+    }
+
+    #[test]
+    fn retrying_a_failed_load_reopens_the_same_chat_once() {
+        let mut tdlib = OpenCounts::default();
+        let a = tdlib.select(1);
+        tdlib.open(a);
+        let retry = tdlib.select(1);
+        tdlib.open(retry);
+        tdlib.assert_balanced();
+        assert_eq!(tdlib.counts[&1], 1);
+    }
+
+    #[test]
+    fn errors_are_joined_once_each() {
+        let mut banner = ErrorBanner::default();
+        assert_eq!(banner.text(), None);
+        banner.push("a".into(), Some(1));
+        banner.push("b".into(), Some(1));
+        banner.push("a".into(), Some(1));
+        assert_eq!(banner.text().as_deref(), Some("a; b"));
+    }
+
+    #[test]
+    fn chat_errors_never_replace_global_ones() {
+        let mut banner = ErrorBanner::default();
+        banner.push("chats failed".into(), None);
+        banner.push("send failed".into(), Some(1));
+        assert_eq!(banner.text().as_deref(), Some("chats failed; send failed"));
+        // Switching chats hides only the chat's errors.
+        banner.clear_chat();
+        assert_eq!(banner.text().as_deref(), Some("chats failed"));
+        banner.clear();
+        assert_eq!(banner.text(), None);
     }
 }

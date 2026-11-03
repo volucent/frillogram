@@ -38,18 +38,31 @@ FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogra
 ```
 
 Or put them in a `.env` file in the repository root (it's in `.gitignore`), readable only by you, and load
-it into your shell. Creating the file private before writing to it keeps the hash from ever being readable
-by others. Note that `install` replaces an existing `.env` with an empty file:
+it into your shell. Create the file private first, so the hash is never readable by others, then add the
+values in an editor; typed into the shell, even in a heredoc, they'd end up in its history. Note that
+`install` replaces an existing `.env` with an empty file:
 
 ```sh
 install -m 600 /dev/null .env
-cat > .env <<'EOF'
+$EDITOR .env
+```
+
+The file should contain:
+
+```sh
 FRILLOGRAM_API_ID=12345
 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef
-EOF
+```
+
+Then load it and run:
+
+```sh
 set -a; source .env; set +a
 cargo run
 ```
+
+To also keep the hash out of the environment of build scripts, run `cargo build` first and then start
+`target/debug/frillogram` with the variables set.
 
 You can also pass them inline, but then the `api_hash` lands in your shell history:
 
@@ -88,7 +101,8 @@ TDLib's database (your login session and message cache) lives in a `tdlib` folde
 `FRILLOGRAM_DATA_DIR` to use another folder instead of `frillogram`, for example a separate one for a
 second account or for testing; the `tdlib` folder is created inside it. Use an absolute path outside the
 repository, so the session never ends up in a commit and doesn't depend on where you launch from:
-Frillogram refuses to start with a relative one. An empty value means the default. It isn't encrypted yet.
+with a relative one, Frillogram shows an error and doesn't connect. An empty value means the default. It
+isn't encrypted yet.
 
 Deleting the `tdlib` folder only logs you out locally: the session stays active on Telegram's side. To end
 it, terminate it from another Telegram app, in the **Devices** (mobile apps) or **Active Sessions**
@@ -98,4 +112,4 @@ it, terminate it from another Telegram app, in the **Devices** (mobile apps) or 
 |---|---|---|
 | `FRILLOGRAM_API_ID` | yes | Your app's `api_id` from my.telegram.org. |
 | `FRILLOGRAM_API_HASH` | yes | Your app's `api_hash` from my.telegram.org. |
-| `FRILLOGRAM_DATA_DIR` | no | An absolute path outside the repository to keep TDLib's database in (under `tdlib/`) instead of the default above. A relative path is refused at startup; an empty value means the default. |
+| `FRILLOGRAM_DATA_DIR` | no | An absolute path outside the repository to keep TDLib's database in (under `tdlib/`) instead of the default above. With a relative path, Frillogram shows an error and doesn't connect; an empty value means the default. |
