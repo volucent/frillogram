@@ -1,6 +1,9 @@
 //! App-level types. TDLib's generated types are huge and change with every
 //! TDLib release, so the UI only ever sees these small, stable shapes.
 
+use std::path::Path;
+
+use base64::Engine as _;
 use tdlib_rs::{enums, types};
 
 /// Who sent a message: a user, or a chat posting on its own behalf
@@ -18,11 +21,120 @@ pub struct Msg {
     pub sender: SenderId,
     /// Unix timestamp.
     pub date: i32,
+    /// The text, or a media message's caption, which may be empty. Media
+    /// that isn't shown inline is a label here instead, like `[Video]`.
     pub text: String,
+    /// A photo or GIF shown inline.
+    pub media: Option<Media>,
     /// The message this one replies to, if it is in the same chat.
     pub reply_to: Option<i64>,
     pub outgoing: bool,
     pub send_state: SendState,
+    /// False for protected content: the chat forbids saving and forwarding,
+    /// so files from it mustn't be opened outside Frillogram.
+    pub can_be_saved: bool,
+}
+
+/// Media shown inline. Other kinds stay labels in [`Msg::text`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Media {
+    Photo(Photo),
+    Animation(Animation),
+}
+
+impl Media {
+    /// The size the sender gave, in px; either may be 0 if unknown.
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Media::Photo(p) => (p.width, p.height),
+            Media::Animation(a) => (a.width, a.height),
+        }
+    }
+
+    /// Whether the sender hid it behind a spoiler, to be blurred until revealed.
+    pub fn has_spoiler(&self) -> bool {
+        match self {
+            Media::Photo(p) => p.has_spoiler,
+            Media::Animation(a) => a.has_spoiler,
+        }
+    }
+
+    /// A tiny JPEG of the image, to blur up while the real one loads.
+    pub fn minithumbnail(&self) -> Option<&[u8]> {
+        match self {
+            Media::Photo(p) => p.minithumbnail.as_deref(),
+            Media::Animation(a) => a.minithumbnail.as_deref(),
+        }
+    }
+}
+
+/// One size of a photo, picked to fit the message list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Photo {
+    /// TDLib's file id, valid for this session only.
+    pub file_id: i32,
+    pub width: u32,
+    pub height: u32,
+    pub minithumbnail: Option<Vec<u8>>,
+    pub has_spoiler: bool,
+}
+
+/// A GIF, which Telegram usually stores as a silent MP4.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animation {
+    pub file_id: i32,
+    /// Stays the same across sessions, unlike `file_id`; may be empty.
+    pub unique_id: String,
+    pub width: u32,
+    pub height: u32,
+    /// Usually "image/gif" or "video/mp4".
+    pub mime_type: String,
+    pub thumbnail: Option<Thumbnail>,
+    pub minithumbnail: Option<Vec<u8>>,
+    pub has_spoiler: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Thumbnail {
+    pub file_id: i32,
+    pub format: ThumbnailFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbnailFormat {
+    Jpeg,
+    Png,
+    Webp,
+    /// A still GIF.
+    Gif,
+    Mpeg4,
+    Other,
+}
+
+impl ThumbnailFormat {
+    /// Whether it's a still image that can be drawn as it is.
+    pub fn is_image(self) -> bool {
+        matches!(self, ThumbnailFormat::Jpeg | ThumbnailFormat::Png | ThumbnailFormat::Webp | ThumbnailFormat::Gif)
+    }
+}
+
+/// How a local file is sent: as a photo or as a GIF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upload {
+    Photo,
+    Animation,
+}
+
+impl Upload {
+    /// What `path` is sent as, by its extension; `None` if it can't be sent.
+    pub fn for_path(path: &Path) -> Option<Self> {
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        match extension.as_str() {
+            "jpg" | "jpeg" | "png" | "webp" => Some(Upload::Photo),
+            "gif" => Some(Upload::Animation),
+            _ => None,
+        }
+    }
 }
 
 /// Whether a message has reached Telegram's servers.
@@ -106,11 +218,13 @@ pub enum Event {
         chat_id: i64,
         message_ids: Vec<i64>,
     },
-    /// A message's content changed, e.g. after an edit.
-    MessageText {
+    /// A message's content changed, e.g. after an edit, which can also
+    /// swap its media.
+    MessageContent {
         chat_id: i64,
         message_id: i64,
         text: String,
+        media: Option<Media>,
     },
     User {
         id: i64,
@@ -160,7 +274,8 @@ impl Event {
                 Event::MessagesDeleted { chat_id: u.chat_id, message_ids: u.message_ids }
             }
             U::MessageContent(u) => {
-                Event::MessageText { chat_id: u.chat_id, message_id: u.message_id, text: content_text(&u.new_content) }
+                let (text, media) = body(&u.new_content);
+                Event::MessageContent { chat_id: u.chat_id, message_id: u.message_id, text, media }
             }
             U::User(u) => Event::User { id: u.user.id, name: user_name(&u.user) },
             _ => return None,
@@ -216,6 +331,7 @@ impl From<types::Message> for Msg {
             }
             _ => None,
         };
+        let (text, media) = body(&message.content);
         Msg {
             id: message.id,
             chat_id: message.chat_id,
@@ -224,7 +340,8 @@ impl From<types::Message> for Msg {
                 enums::MessageSender::Chat(c) => SenderId::Chat(c.chat_id),
             },
             date: message.date,
-            text: content_text(&message.content),
+            text,
+            media,
             reply_to,
             outgoing: message.is_outgoing,
             send_state: match message.sending_state {
@@ -232,6 +349,7 @@ impl From<types::Message> for Msg {
                 Some(enums::MessageSendingState::Pending(_)) => SendState::Pending,
                 Some(enums::MessageSendingState::Failed(_)) => SendState::Failed,
             },
+            can_be_saved: message.can_be_saved,
         }
     }
 }
@@ -265,8 +383,90 @@ fn preview(message: &types::Message) -> String {
     content_text(&message.content).lines().next().unwrap_or_default().to_string()
 }
 
-/// Text for a message body. Media isn't rendered yet, so it becomes a label
-/// followed by its caption.
+/// A message's text and inline media. A photo or GIF leaves only its
+/// caption as text; other media stays a label. Self-destructing media is
+/// never shown: it stays a label, to be opened in an official app.
+fn body(content: &enums::MessageContent) -> (String, Option<Media>) {
+    use enums::MessageContent as C;
+    let media = match content {
+        C::MessagePhoto(m) if !m.is_secret => {
+            photo(&m.photo, m.has_spoiler).map(|photo| (Media::Photo(photo), &m.caption))
+        }
+        C::MessageAnimation(m) if !m.is_secret => {
+            Some((Media::Animation(animation(&m.animation, m.has_spoiler)), &m.caption))
+        }
+        _ => None,
+    };
+    match media {
+        Some((media, caption)) => (caption.text.clone(), Some(media)),
+        None => (content_text(content), None),
+    }
+}
+
+/// The photo at the size the message list draws it, if it has any size.
+fn photo(photo: &types::Photo, has_spoiler: bool) -> Option<Photo> {
+    let size = pick_photo_size(&photo.sizes)?;
+    Some(Photo {
+        file_id: size.photo.id,
+        width: size.width.max(0) as u32,
+        height: size.height.max(0) as u32,
+        minithumbnail: minithumbnail(photo.minithumbnail.as_ref()),
+        has_spoiler,
+    })
+}
+
+/// Longest side TDLib's photo sizes are picked by: enough for an inline image
+/// on a high-density screen, without downloading the original.
+const PHOTO_MAX_SIDE: i32 = 1280;
+
+/// The largest size whose longer side is at most [`PHOTO_MAX_SIDE`], or else
+/// the smallest.
+fn pick_photo_size(sizes: &[types::PhotoSize]) -> Option<&types::PhotoSize> {
+    let longer_side = |size: &types::PhotoSize| size.width.max(size.height);
+    let area = |size: &types::PhotoSize| i64::from(size.width) * i64::from(size.height);
+    sizes
+        .iter()
+        .filter(|size| longer_side(size) <= PHOTO_MAX_SIDE)
+        .max_by_key(|size| area(size))
+        .or_else(|| sizes.iter().min_by_key(|size| area(size)))
+}
+
+fn animation(animation: &types::Animation, has_spoiler: bool) -> Animation {
+    use enums::ThumbnailFormat as F;
+    Animation {
+        file_id: animation.animation.id,
+        unique_id: animation.animation.remote.unique_id.clone(),
+        width: animation.width.max(0) as u32,
+        height: animation.height.max(0) as u32,
+        mime_type: animation.mime_type.clone(),
+        thumbnail: animation.thumbnail.as_ref().map(|thumbnail| Thumbnail {
+            file_id: thumbnail.file.id,
+            format: match thumbnail.format {
+                F::Jpeg => ThumbnailFormat::Jpeg,
+                F::Png => ThumbnailFormat::Png,
+                F::Webp => ThumbnailFormat::Webp,
+                F::Gif => ThumbnailFormat::Gif,
+                F::Mpeg4 => ThumbnailFormat::Mpeg4,
+                _ => ThumbnailFormat::Other,
+            },
+        }),
+        minithumbnail: minithumbnail(animation.minithumbnail.as_ref()),
+        has_spoiler,
+    }
+}
+
+/// The minithumbnail's JPEG bytes. TDLib's JSON sends bytes as base64; a
+/// thumbnail that doesn't decode is just left out.
+fn minithumbnail(minithumbnail: Option<&types::Minithumbnail>) -> Option<Vec<u8>> {
+    let data = &minithumbnail?.data;
+    base64::engine::general_purpose::STANDARD.decode(data).ok().filter(|bytes| !bytes.is_empty())
+}
+
+const SECRET_PHOTO: &str = "[Self-destructing photo, open it in an official app]";
+const SECRET_GIF: &str = "[Self-destructing GIF, open it in an official app]";
+
+/// Text for a message body, and the chat list's preview of it. Media becomes
+/// a label followed by its caption.
 fn content_text(content: &enums::MessageContent) -> String {
     use enums::MessageContent as C;
     let with_caption = |label: &str, caption: &types::FormattedText| {
@@ -274,8 +474,10 @@ fn content_text(content: &enums::MessageContent) -> String {
     };
     match content {
         C::MessageText(m) => m.text.text.clone(),
+        C::MessagePhoto(m) if m.is_secret => with_caption(SECRET_PHOTO, &m.caption),
         C::MessagePhoto(m) => with_caption("[Photo]", &m.caption),
         C::MessageVideo(m) => with_caption("[Video]", &m.caption),
+        C::MessageAnimation(m) if m.is_secret => with_caption(SECRET_GIF, &m.caption),
         C::MessageAnimation(m) => with_caption("[GIF]", &m.caption),
         C::MessageDocument(m) => with_caption("[File]", &m.caption),
         C::MessageAudio(m) => with_caption("[Audio]", &m.caption),
@@ -375,5 +577,209 @@ mod tests {
         assert!(deleted_pending_copy(failed(message(2, scheduled()))));
         assert!(matches!(sent(message(2, None)), Some(Event::MessageSent { old_id: 1, message: Msg { id: 2, .. } })));
         assert!(matches!(failed(message(2, None)), Some(Event::MessageSendFailed { old_id: 1, .. })));
+    }
+
+    fn file(id: i32) -> types::File {
+        types::File { id, ..Default::default() }
+    }
+
+    fn size(id: i32, width: i32, height: i32) -> types::PhotoSize {
+        types::PhotoSize { r#type: "x".into(), photo: file(id), width, height, progressive_sizes: Vec::new() }
+    }
+
+    fn caption(text: &str) -> types::FormattedText {
+        types::FormattedText { text: text.into(), entities: Vec::new() }
+    }
+
+    fn with_content(content: enums::MessageContent) -> Msg {
+        Msg::from(types::Message { content, ..message(2, None) })
+    }
+
+    #[test]
+    fn photo_size_is_the_largest_that_fits_else_the_smallest() {
+        let sizes = [size(1, 90, 60), size(2, 1280, 853), size(3, 800, 533), size(4, 2560, 1706)];
+        assert_eq!(pick_photo_size(&sizes).map(|s| s.photo.id), Some(2));
+        // Portrait: the longer side is the height.
+        let sizes = [size(1, 853, 1280), size(2, 1000, 1500)];
+        assert_eq!(pick_photo_size(&sizes).map(|s| s.photo.id), Some(1));
+        let too_big = [size(1, 4000, 3000), size(2, 2000, 1500), size(3, 3000, 2000)];
+        assert_eq!(pick_photo_size(&too_big).map(|s| s.photo.id), Some(2));
+        assert!(pick_photo_size(&[]).is_none());
+    }
+
+    #[test]
+    fn photo_message_keeps_its_caption_as_text() {
+        // "AQID" is base64 for the bytes 1, 2, 3.
+        let mini = types::Minithumbnail { width: 40, height: 30, data: "AQID".into() };
+        let photo = types::Photo {
+            has_stickers: false,
+            minithumbnail: Some(mini),
+            sizes: vec![size(5, 320, 240), size(6, 1280, 960), size(7, 2560, 1920)],
+        };
+        let content = enums::MessageContent::MessagePhoto(types::MessagePhoto {
+            photo,
+            caption: caption("Look"),
+            show_caption_above_media: false,
+            has_spoiler: false,
+            is_secret: false,
+        });
+        let message = with_content(content.clone());
+        assert_eq!(message.text, "Look");
+        assert_eq!(
+            message.media,
+            Some(Media::Photo(Photo {
+                file_id: 6,
+                width: 1280,
+                height: 960,
+                minithumbnail: Some(vec![1, 2, 3]),
+                has_spoiler: false
+            }))
+        );
+        // The chat list keeps the label.
+        assert_eq!(content_text(&content), "[Photo] Look");
+    }
+
+    #[test]
+    fn photo_without_sizes_stays_a_label() {
+        let content = enums::MessageContent::MessagePhoto(types::MessagePhoto {
+            photo: types::Photo::default(),
+            caption: caption(""),
+            show_caption_above_media: false,
+            has_spoiler: false,
+            is_secret: false,
+        });
+        let message = with_content(content);
+        assert_eq!((message.text.as_str(), message.media), ("[Photo]", None));
+    }
+
+    fn animation_content(thumbnail: Option<types::Thumbnail>, minithumbnail: &str) -> enums::MessageContent {
+        animation_with(thumbnail, minithumbnail, false, false)
+    }
+
+    fn animation_with(
+        thumbnail: Option<types::Thumbnail>,
+        minithumbnail: &str,
+        has_spoiler: bool,
+        is_secret: bool,
+    ) -> enums::MessageContent {
+        let mut animation = file(9);
+        animation.remote.unique_id = "AgADxyz".into();
+        enums::MessageContent::MessageAnimation(types::MessageAnimation {
+            animation: types::Animation {
+                duration: 3,
+                width: 480,
+                height: 270,
+                file_name: "cat.mp4".into(),
+                mime_type: "video/mp4".into(),
+                has_stickers: false,
+                minithumbnail: Some(types::Minithumbnail { width: 40, height: 22, data: minithumbnail.into() }),
+                thumbnail,
+                animation,
+            },
+            caption: caption(""),
+            show_caption_above_media: false,
+            has_spoiler,
+            is_secret,
+        })
+    }
+
+    #[test]
+    fn animation_message_carries_its_files() {
+        let thumbnail =
+            types::Thumbnail { format: enums::ThumbnailFormat::Jpeg, width: 320, height: 180, file: file(10) };
+        let message = with_content(animation_content(Some(thumbnail), "AQID"));
+        assert_eq!(message.text, "");
+        assert_eq!(
+            message.media,
+            Some(Media::Animation(Animation {
+                file_id: 9,
+                unique_id: "AgADxyz".into(),
+                width: 480,
+                height: 270,
+                mime_type: "video/mp4".into(),
+                thumbnail: Some(Thumbnail { file_id: 10, format: ThumbnailFormat::Jpeg }),
+                minithumbnail: Some(vec![1, 2, 3]),
+                has_spoiler: false,
+            }))
+        );
+        assert_eq!(content_text(&animation_content(None, "")), "[GIF]");
+    }
+
+    fn photo_content(has_spoiler: bool, is_secret: bool, caption_text: &str) -> enums::MessageContent {
+        enums::MessageContent::MessagePhoto(types::MessagePhoto {
+            photo: types::Photo { has_stickers: false, minithumbnail: None, sizes: vec![size(5, 320, 240)] },
+            caption: caption(caption_text),
+            show_caption_above_media: false,
+            has_spoiler,
+            is_secret,
+        })
+    }
+
+    #[test]
+    fn spoilers_and_protection_are_carried() {
+        let message = with_content(photo_content(true, false, ""));
+        assert!(message.media.as_ref().is_some_and(Media::has_spoiler));
+        assert!(message.can_be_saved);
+        let message = with_content(animation_with(None, "", true, false));
+        assert!(message.media.as_ref().is_some_and(Media::has_spoiler));
+        let protected = Msg::from(types::Message { can_be_saved: false, ..message_with_photo() });
+        assert!(!protected.can_be_saved);
+        assert!(!with_content(photo_content(false, false, "")).media.unwrap().has_spoiler());
+    }
+
+    fn message_with_photo() -> types::Message {
+        types::Message { content: photo_content(false, false, ""), ..message(2, None) }
+    }
+
+    #[test]
+    fn self_destructing_media_is_a_label_only() {
+        let message = with_content(photo_content(false, true, "Quick"));
+        assert_eq!(message.media, None);
+        assert_eq!(message.text, "[Self-destructing photo, open it in an official app] Quick");
+        let message = with_content(animation_with(None, "", false, true));
+        assert_eq!(message.media, None);
+        assert_eq!(message.text, "[Self-destructing GIF, open it in an official app]");
+        // The chat list shows the same label.
+        let preview = preview(&types::Message { content: photo_content(false, true, ""), ..message_with_photo() });
+        assert_eq!(preview, "[Self-destructing photo, open it in an official app]");
+        // An edit can't smuggle it in either.
+        let event = Event::from_update(enums::Update::MessageContent(types::UpdateMessageContent {
+            chat_id: CHAT,
+            message_id: 2,
+            new_content: photo_content(false, true, ""),
+        }));
+        assert!(matches!(event, Some(Event::MessageContent { media: None, .. })));
+    }
+
+    #[test]
+    fn broken_minithumbnail_is_left_out() {
+        let message = with_content(animation_content(None, "not base64!"));
+        let Some(Media::Animation(animation)) = message.media else { panic!("no animation") };
+        assert_eq!((animation.minithumbnail, animation.thumbnail), (None, None));
+    }
+
+    #[test]
+    fn edits_carry_the_new_media() {
+        let event = Event::from_update(enums::Update::MessageContent(types::UpdateMessageContent {
+            chat_id: CHAT,
+            message_id: 2,
+            new_content: animation_content(None, ""),
+        }));
+        let Some(Event::MessageContent { chat_id: CHAT, message_id: 2, text, media }) = event else {
+            panic!("not a content change: {event:?}")
+        };
+        assert_eq!(text, "");
+        assert!(matches!(media, Some(Media::Animation(Animation { file_id: 9, .. }))));
+    }
+
+    #[test]
+    fn uploads_are_classified_by_extension() {
+        for photo in ["a.jpg", "b.JPEG", "/x/c.png", "d.webp"] {
+            assert_eq!(Upload::for_path(Path::new(photo)), Some(Upload::Photo), "{photo}");
+        }
+        assert_eq!(Upload::for_path(Path::new("e.GIF")), Some(Upload::Animation));
+        for other in ["f.mp4", "g.heic", "h", ".png", "i.png.txt", "/dir.png/j"] {
+            assert_eq!(Upload::for_path(Path::new(other)), None, "{other}");
+        }
     }
 }

@@ -26,10 +26,42 @@ issues, or put it in screenshots.
 ## 2. Run Frillogram
 
 You need Rust 1.92 or newer ([rustup.rs](https://rustup.rs)); on Linux, also the packages under
-[Linux prerequisites](#linux-prerequisites). Frillogram reads the credentials from environment variables.
+[Linux prerequisites](#linux-prerequisites).
 
-Keep them in a password manager and read them when launching, for example with
-[`pass`](https://www.passwordstore.org):
+The simplest way is the config file, with the `api_hash` kept in a password manager such as
+[`pass`](https://www.passwordstore.org) and read by a command Frillogram runs on startup. No
+environment variables are needed:
+
+```sh
+pass insert frillogram/api_hash
+mkdir -p ~/.config/frillogram
+$EDITOR ~/.config/frillogram/config.toml
+```
+
+Put your own `api_id` in the file:
+
+```toml
+[telegram]
+api_id = 12345
+api_hash_command = "pass frillogram/api_hash"
+```
+
+Then run it:
+
+```sh
+cargo run
+```
+
+`api_hash_command` is run with `sh -c`, and the first line it prints, without surrounding whitespace, is
+the `api_hash`. If it fails or prints nothing, Frillogram shows its error output and doesn't connect. Any
+command works, for example `security find-generic-password -s frillogram -w` with the macOS keychain. The
+`api_hash` itself is never read from the config file, since config files often end up in published
+dotfiles; Frillogram refuses to start if the file has an `api_hash` key.
+
+### With environment variables instead
+
+`FRILLOGRAM_API_ID` and `FRILLOGRAM_API_HASH` work too, and override the config file. Read them from a
+password manager when launching:
 
 ```sh
 pass insert frillogram/api_id
@@ -87,6 +119,16 @@ sudo apt install build-essential pkg-config libc++-dev libc++abi-dev \
 At runtime GPUI renders through Vulkan (`libvulkan1` plus your GPU's driver, e.g. `mesa-vulkan-drivers`)
 and loads `libwayland-client` when running under Wayland.
 
+### ffmpeg, for GIFs (optional)
+
+Telegram stores most GIFs as silent MP4 videos. Frillogram plays them inline by converting each one to a
+GIF once with [ffmpeg](https://ffmpeg.org), at the size it's shown, and caches the result in the `tdlib`
+folder ([where data is kept](#where-data-is-kept)). Real GIFs are shrunk the same way, since every frame
+of a GIF is kept in memory. Without ffmpeg, everything else works: those MP4 GIFs show as stills that
+open in your viewer when clicked, and real GIFs play as they are unless they're over 8 MB or Full HD. Install it with `brew install ffmpeg` on macOS,
+`pacman -S ffmpeg` on Arch Linux or `sudo apt install ffmpeg` on Debian or Ubuntu. `[media] ffmpeg` in
+the config file names another program or path, and `""` turns conversion off.
+
 ## 3. Log in
 
 Frillogram asks for your phone number, then the login code, then your two-step verification password if
@@ -94,22 +136,65 @@ you have one set. Telegram usually sends the code as a message to your Telegram 
 you aren't logged in anywhere else, it may come by SMS or a phone call instead. The login screen says
 which.
 
+## Configuration
+
+Frillogram reads one TOML file, and every setting has a default, so the file is optional. It's the first
+of these that's set, on macOS and Linux alike:
+
+1. `--config <path>` on the command line, e.g. `cargo run -- --config ~/frillogram-test.toml`.
+2. The `FRILLOGRAM_CONFIG` environment variable.
+3. `$XDG_CONFIG_HOME/frillogram/config.toml`.
+4. `~/.config/frillogram/config.toml`.
+
+A file named by `--config` or `FRILLOGRAM_CONFIG` has to exist; at the other two places, no file means
+all defaults. [`config.example.toml`](config.example.toml) lists every key, commented out and set to its
+default, with what it does and which values it takes; `frillogram --print-default-config` prints it, so
+`cargo run -- --print-default-config > ~/.config/frillogram/config.toml` is a good start. Its sections
+are:
+
+- `[telegram]`: `api_id`, `api_hash_command` and `data_dir`, described above and below.
+- `[appearance]`: `theme` (`"system"`, which follows the OS's light or dark appearance, `"light"` or
+  `"dark"`), `accent` (a `"#rrggbb"` color), `font_family`, `font_size`, `density` (`"comfortable"` or
+  `"compact"`) and `avatar_size`.
+- `[layout]`: the window's size when it opens, and the widths of the chat list and the thread panel.
+- `[time]`: the [strftime formats](https://docs.rs/chrono/latest/chrono/format/strftime/) of message
+  times, today and older, and of the day separators between messages, this year and in other years.
+- `[chats]`: `history_limit`, how many of the latest messages to load when a chat is opened, and
+  `group_minutes`, how close together one sender's messages have to be to share a name and avatar.
+- `[media]`: whether photos and GIFs download (`autoload`) and GIFs play (`autoplay_gifs`) on their own
+  or on a click, their largest inline size (`max_width`, `max_height`), the `ffmpeg` that converts MP4
+  GIFs, and `open_command`, the program a clicked photo or GIF opens in (`open` on macOS and `xdg-open`
+  on Linux by default).
+
+Frillogram only reads the file, never writes it, and doesn't watch it: restart Frillogram after changing
+it. An unknown key, a wrong type or a value out of range is an error: Frillogram shows it with the file,
+the line or key and the allowed values, and doesn't connect until it's fixed.
+
+The environment variables below override the file's `[telegram]` keys. An empty or blank value counts as
+unset, so a failed `$(pass …)` falls back to the file.
+
+| Variable | Overrides | Meaning |
+|---|---|---|
+| `FRILLOGRAM_CONFIG` | | Where the config file is, instead of the default places. |
+| `FRILLOGRAM_API_ID` | `api_id` | Your app's `api_id` from my.telegram.org. |
+| `FRILLOGRAM_API_HASH` | `api_hash_command` | Your app's `api_hash` from my.telegram.org. When it's set, `api_hash_command` isn't run. |
+| `FRILLOGRAM_DATA_DIR` | `data_dir` | An absolute path outside the repository to keep TDLib's database in (under `tdlib/`) instead of the default below. With a relative path, Frillogram shows an error and doesn't connect. |
+
+An `api_id` and an `api_hash` are required, from either the file or the environment.
+
 ## Where data is kept
 
 TDLib's database (your login session and message cache) lives in a `tdlib` folder inside
 `~/Library/Application Support/frillogram` on macOS and `~/.local/share/frillogram` on Linux. Set
-`FRILLOGRAM_DATA_DIR` to use another folder instead of `frillogram`, for example a separate one for a
-second account or for testing; the `tdlib` folder is created inside it. Use an absolute path outside the
-repository, so the session never ends up in a commit and doesn't depend on where you launch from:
-with a relative one, Frillogram shows an error and doesn't connect. An empty value means the default. It
-isn't encrypted yet.
+`data_dir` in `[telegram]` (where a leading `~/` means your home directory) or `FRILLOGRAM_DATA_DIR` to
+use another folder instead of `frillogram`, for example a separate one for a second account or for
+testing; the `tdlib` folder is created inside it. Use an absolute path outside the repository, so the
+session never ends up in a commit and doesn't depend on where you launch from: with a relative one,
+Frillogram shows an error and doesn't connect. An empty value means the default. It isn't encrypted yet.
+Also in the `tdlib` folder, `gif-cache` holds GIFs converted by ffmpeg, and `pasted` holds images pasted
+into a composer, each removed once its message is sent or has failed (or, failing that, by a paste 30
+days later); both are safe to delete.
 
 Deleting the `tdlib` folder only logs you out locally: the session stays active on Telegram's side. To end
 it, terminate it from another Telegram app, in the **Devices** (mobile apps) or **Active Sessions**
 (Telegram Desktop) list in Settings.
-
-| Variable | Required | Meaning |
-|---|---|---|
-| `FRILLOGRAM_API_ID` | yes | Your app's `api_id` from my.telegram.org. |
-| `FRILLOGRAM_API_HASH` | yes | Your app's `api_hash` from my.telegram.org. |
-| `FRILLOGRAM_DATA_DIR` | no | An absolute path outside the repository to keep TDLib's database in (under `tdlib/`) instead of the default above. With a relative path, Frillogram shows an error and doesn't connect; an empty value means the default. |

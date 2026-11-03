@@ -1,94 +1,11 @@
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use tdlib_rs::{enums, functions, types};
 
-use crate::{AuthStep, Event, Msg};
+use crate::{AuthStep, Config, Event, Msg, Upload};
 
-/// Telegram API credentials and where TDLib keeps its database.
-#[derive(Clone)]
-pub struct Config {
-    pub api_id: i32,
-    pub api_hash: String,
-    pub data_dir: PathBuf,
-}
-
-// `api_hash` is a secret, so it never shows up in logs.
-impl std::fmt::Debug for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
-            .field("api_id", &self.api_id)
-            .field("api_hash", &"<redacted>")
-            .field("data_dir", &self.data_dir)
-            .finish()
-    }
-}
-
-/// Why [`Config::from_env`] failed, so the setup screen can say what to fix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigError {
-    /// `FRILLOGRAM_API_ID` or `FRILLOGRAM_API_HASH` is missing or malformed.
-    Credentials(String),
-    /// There's no usable place for TDLib's database.
-    DataDir(String),
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::Credentials(error) | ConfigError::DataDir(error) => f.write_str(error),
-        }
-    }
-}
-
-impl Config {
-    /// Reads `FRILLOGRAM_API_ID` and `FRILLOGRAM_API_HASH`. Each user gets
-    /// their own pair at <https://my.telegram.org>; they're never committed.
-    /// `FRILLOGRAM_DATA_DIR` overrides where the TDLib database lives.
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_vars(|name| std::env::var_os(name), dirs::data_local_dir)
-    }
-
-    /// [`Config::from_env`] with the environment and the default data
-    /// directory passed in, so it can be tested.
-    fn from_vars(
-        var: impl Fn(&str) -> Option<OsString>,
-        default_dir: impl FnOnce() -> Option<PathBuf>,
-    ) -> Result<Self, ConfigError> {
-        let credentials = |error: String| ConfigError::Credentials(error);
-        // An empty or blank value usually means a failed `$(pass …)`, so it
-        // counts as unset.
-        let text = |name: &str| {
-            var(name)
-                .map(OsString::into_string)
-                .transpose()
-                .map(|value| value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()))
-                .map_err(|_| credentials(format!("{name} is not valid UTF-8")))
-        };
-        let api_id = text("FRILLOGRAM_API_ID")?
-            .ok_or_else(|| credentials("FRILLOGRAM_API_ID is not set".into()))?
-            .parse()
-            .map_err(|_| credentials("FRILLOGRAM_API_ID must be a number".into()))?;
-        let api_hash =
-            text("FRILLOGRAM_API_HASH")?.ok_or_else(|| credentials("FRILLOGRAM_API_HASH is not set".into()))?;
-        // Not trimmed: spaces can be part of a path.
-        let data_dir = match var("FRILLOGRAM_DATA_DIR").filter(|dir| !dir.to_string_lossy().trim().is_empty()) {
-            // A relative path would depend on where Frillogram is launched
-            // from, and could put the session inside a repository.
-            Some(dir) if !Path::new(&dir).is_absolute() => {
-                return Err(ConfigError::DataDir("FRILLOGRAM_DATA_DIR must be an absolute path".into()));
-            }
-            Some(dir) => PathBuf::from(dir),
-            None => default_dir()
-                .ok_or_else(|| ConfigError::DataDir("no local data directory on this system".into()))?
-                .join("frillogram"),
-        }
-        .join("tdlib");
-        Ok(Config { api_id, api_hash, data_dir })
-    }
-}
+/// TDLib's download priority, 1 to 32, for files shown in the open chat.
+const DOWNLOAD_PRIORITY: i32 = 16;
 
 /// A TDLib client. Cheap to clone: it's only TDLib's client id.
 #[derive(Debug, Clone, Copy)]
@@ -210,6 +127,65 @@ impl Telegram {
     /// Sends a text message. It arrives back as [`Event::NewMessage`] while
     /// sending and [`Event::MessageSent`] once the server accepts it.
     pub async fn send_text(self, chat_id: i64, text: String, reply_to: Option<i64>) -> Result<(), String> {
+        let content = enums::InputMessageContent::InputMessageText(types::InputMessageText {
+            text: types::FormattedText { text, entities: Vec::new() },
+            link_preview_options: None,
+            clear_draft: true,
+        });
+        self.send(chat_id, content, reply_to).await.map(|_| ())
+    }
+
+    /// Sends the local file at `path` as a photo or GIF of `size` (width, height)
+    /// in px (0 if unknown), with `caption` ("" for none). Pass the real size: in
+    /// a secret chat the file is end-to-end encrypted, so the server can't read
+    /// it and the recipient would get 0 x 0. Like [`Telegram::send_text`], this returns once TDLib queued it;
+    /// the upload follows, and a failed one arrives as [`Event::MessageSendFailed`]. Returns the queued
+    /// message's temporary id, which that event and [`Event::MessageSent`] carry as `old_id`.
+    pub async fn send_file(
+        self,
+        chat_id: i64,
+        path: PathBuf,
+        upload: Upload,
+        size: (u32, u32),
+        caption: String,
+        reply_to: Option<i64>,
+    ) -> Result<i64, String> {
+        let file = enums::InputFile::Local(types::InputFileLocal { path: path.to_string_lossy().into_owned() });
+        let caption = (!caption.is_empty()).then(|| types::FormattedText { text: caption, entities: Vec::new() });
+        let (width, height) = (i32::try_from(size.0).unwrap_or(0), i32::try_from(size.1).unwrap_or(0));
+        let content = match upload {
+            Upload::Photo => enums::InputMessageContent::InputMessagePhoto(types::InputMessagePhoto {
+                photo: file,
+                thumbnail: None,
+                added_sticker_file_ids: Vec::new(),
+                width,
+                height,
+                caption,
+                show_caption_above_media: false,
+                self_destruct_type: None,
+                has_spoiler: false,
+            }),
+            Upload::Animation => enums::InputMessageContent::InputMessageAnimation(types::InputMessageAnimation {
+                animation: file,
+                thumbnail: None,
+                added_sticker_file_ids: Vec::new(),
+                duration: 0,
+                width,
+                height,
+                caption,
+                show_caption_above_media: false,
+                has_spoiler: false,
+            }),
+        };
+        self.send(chat_id, content, reply_to).await
+    }
+
+    async fn send(
+        self,
+        chat_id: i64,
+        content: enums::InputMessageContent,
+        reply_to: Option<i64>,
+    ) -> Result<i64, String> {
         let reply_to = reply_to.map(|message_id| {
             enums::InputMessageReplyTo::Message(types::InputMessageReplyToMessage {
                 message_id,
@@ -217,12 +193,23 @@ impl Telegram {
                 checklist_task_id: 0,
             })
         });
-        let content = enums::InputMessageContent::InputMessageText(types::InputMessageText {
-            text: types::FormattedText { text, entities: Vec::new() },
-            link_preview_options: None,
-            clear_draft: true,
-        });
-        functions::send_message(chat_id, None, reply_to, None, content, self.id).await.map(|_| ()).map_err(message)
+        functions::send_message(chat_id, None, reply_to, None, content, self.id)
+            .await
+            .map(|enums::Message::Message(message)| message.id)
+            .map_err(message)
+    }
+
+    /// Downloads a file, returning once it's complete, and returns its local
+    /// path. A file that's already downloaded returns right away.
+    pub async fn download(self, file_id: i32) -> Result<PathBuf, String> {
+        let enums::File::File(file) =
+            functions::download_file(file_id, DOWNLOAD_PRIORITY, 0, 0, true, self.id).await.map_err(message)?;
+        // A synchronous download also returns when it was canceled.
+        if file.local.is_downloading_completed && !file.local.path.is_empty() {
+            Ok(PathBuf::from(file.local.path))
+        } else {
+            Err("The download didn't finish.".into())
+        }
     }
 }
 
@@ -273,69 +260,4 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 fn message(error: types::Error) -> String {
     error.message
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-
-    fn config(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
-        let vars: Vec<(&str, OsString)> = vars.iter().map(|&(name, value)| (name, value.into())).collect();
-        config_os(vars)
-    }
-
-    fn config_os(vars: Vec<(&str, OsString)>) -> Result<Config, ConfigError> {
-        let vars: HashMap<&str, OsString> = vars.into_iter().collect();
-        Config::from_vars(|name| vars.get(name).cloned(), || Some(PathBuf::from("/data")))
-    }
-
-    fn credentials_error(error: &str) -> ConfigError {
-        ConfigError::Credentials(error.into())
-    }
-
-    const CREDENTIALS: [(&str, &str); 2] = [("FRILLOGRAM_API_ID", " 123 "), ("FRILLOGRAM_API_HASH", " abc\n")];
-
-    #[test]
-    fn credentials_are_trimmed() {
-        let config = config(&CREDENTIALS).unwrap();
-        assert_eq!((config.api_id, config.api_hash.as_str()), (123, "abc"));
-        assert_eq!(config.data_dir, Path::new("/data/frillogram/tdlib"));
-    }
-
-    #[test]
-    fn blank_credentials_count_as_unset() {
-        let error = config(&[("FRILLOGRAM_API_ID", "  "), CREDENTIALS[1]]).unwrap_err();
-        assert_eq!(error, credentials_error("FRILLOGRAM_API_ID is not set"));
-        let error = config(&[CREDENTIALS[0], ("FRILLOGRAM_API_HASH", "")]).unwrap_err();
-        assert_eq!(error, credentials_error("FRILLOGRAM_API_HASH is not set"));
-        let error = config(&[("FRILLOGRAM_API_ID", "12a"), CREDENTIALS[1]]).unwrap_err();
-        assert_eq!(error, credentials_error("FRILLOGRAM_API_ID must be a number"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn non_utf8_credentials_are_reported_as_such() {
-        use std::os::unix::ffi::OsStringExt;
-        let invalid = || OsString::from_vec(vec![b'1', 0xff]);
-        let error = config_os(vec![("FRILLOGRAM_API_ID", invalid()), (CREDENTIALS[1].0, CREDENTIALS[1].1.into())]);
-        assert_eq!(error.unwrap_err(), credentials_error("FRILLOGRAM_API_ID is not valid UTF-8"));
-        let error = config_os(vec![(CREDENTIALS[0].0, CREDENTIALS[0].1.into()), ("FRILLOGRAM_API_HASH", invalid())]);
-        assert_eq!(error.unwrap_err(), credentials_error("FRILLOGRAM_API_HASH is not valid UTF-8"));
-    }
-
-    #[test]
-    fn blank_data_dir_counts_as_unset() {
-        let config = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", " ")]).unwrap();
-        assert_eq!(config.data_dir, Path::new("/data/frillogram/tdlib"));
-    }
-
-    #[test]
-    fn data_dir_must_be_absolute() {
-        let error = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", "tdata")]).unwrap_err();
-        assert_eq!(error, ConfigError::DataDir("FRILLOGRAM_DATA_DIR must be an absolute path".into()));
-        let config = config(&[CREDENTIALS[0], CREDENTIALS[1], ("FRILLOGRAM_DATA_DIR", "/elsewhere")]).unwrap();
-        assert_eq!(config.data_dir, Path::new("/elsewhere/tdlib"));
-    }
 }

@@ -1,0 +1,79 @@
+# Frillogram configuration.
+#
+# Frillogram reads the first of: the file named by --config <path>, $FRILLOGRAM_CONFIG,
+# $XDG_CONFIG_HOME/frillogram/config.toml, ~/.config/frillogram/config.toml (on macOS too).
+# Without a file, everything is at its default. Every key below is commented out and set to
+# its default; uncomment one to change it. An unknown key or a bad value is an error shown on
+# startup. `frillogram --print-default-config` prints this file.
+
+[telegram]
+# Your app's api_id from my.telegram.org; 0 means unset. FRILLOGRAM_API_ID overrides it.
+# api_id = 0
+# Command run with `sh -c` that prints your api_hash, e.g. "pass frillogram/api_hash"; FRILLOGRAM_API_HASH
+# overrides it. Only the command's first line is used (as with `pass` entries that keep notes below the secret),
+# and it must be 32 hex characters. The api_hash itself is never read from this file.
+# api_hash_command = ""
+# Absolute path (a leading ~/ is expanded) for TDLib's database, which goes in tdlib/ inside it; "" means
+# ~/Library/Application Support/frillogram on macOS, ~/.local/share/frillogram on Linux. FRILLOGRAM_DATA_DIR
+# overrides it.
+# data_dir = ""
+
+[appearance]
+# "system" follows the OS's light or dark appearance, also when it changes; or "light" or "dark".
+# theme = "system"
+# Color of buttons, links and unread badges, as "#rrggbb", e.g. "#2563eb"; "" keeps the theme's.
+# accent = ""
+# Font family for all text, as installed on this machine, e.g. "Inter"; "" keeps the system UI font.
+# font_family = ""
+# Base text size in px, 10 to 32; the other text sizes scale with it.
+# font_size = 16
+# Space around messages, chats and headers: "comfortable", or "compact" to fit more on screen.
+# density = "comfortable"
+# Side of the avatars in the chat list, the headers and next to messages, in px, 20 to 64.
+# avatar_size = 36
+
+[layout]
+# Width of the window when it opens, in px, 480 to 7680.
+# window_width = 1180
+# Height of the window when it opens, in px, 360 to 4320.
+# window_height = 760
+# Width of the chat list, in px, 160 to 640.
+# sidebar_width = 300
+# Width of the thread panel, in px, 240 to 960.
+# thread_panel_width = 400
+
+[time]
+# strftime format for times of today's messages, and the hover time of a message under another;
+# see https://docs.rs/chrono/latest/chrono/format/strftime/
+# today_format = "%H:%M"
+# strftime format for times of older messages.
+# older_format = "%b %-d, %H:%M"
+# strftime format for the day separators between messages, for days before yesterday in this year.
+# day_format = "%A, %B %-d"
+# strftime format for the day separators of days in other years.
+# other_year_day_format = "%A, %B %-d, %Y"
+
+[chats]
+# How many of the latest messages to load when a chat is opened, 1 to 1000.
+# history_limit = 100
+# Messages from the same sender within this many minutes of each other show one name and avatar, 0 to
+# 1440; 0 shows them on every message.
+# group_minutes = 5
+
+[media]
+# Download photos and GIFs as their messages load; false downloads one when you click it.
+# autoload = true
+# Play GIFs inline once they're loaded; false shows a still with a play badge until you click it.
+# autoplay_gifs = true
+# Largest width of an inline photo or GIF, in px, 64 to 2048.
+# max_width = 400
+# Largest height of an inline photo or GIF, in px, 64 to 2048.
+# max_height = 320
+# Program (name or path) that converts Telegram's MP4 "GIFs" to GIF so they play inline, and shrinks real
+# GIFs to their shown size; "" turns conversion off, and MP4 GIFs show as stills that open in open_command.
+# ffmpeg = "ffmpeg"
+# Program that opens a clicked photo or GIF, plus arguments, quoted like a shell (not run through one); the
+# file's path is added last. "" means `open` on macOS and `xdg-open` on Linux. E.g. "open -a Preview",
+# "feh --scale-down" or "open -a 'Adobe Photoshop 2024'". Only images and videos open.
+# Media from chats that restrict saving never opens.
+# open_command = ""

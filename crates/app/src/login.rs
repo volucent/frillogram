@@ -1,44 +1,53 @@
 use frillogram_core::{AuthStep, ConfigError};
 use gpui_kit::{
+    assets::IconName as Lucide,
     component::{
-        ActiveTheme, Disableable,
+        ActiveTheme, Disableable, Icon, IconName, Sizable,
         button::{Button, ButtonVariants},
         input::{Input, InputState},
         v_flex,
     },
+    prelude::FluentBuilder,
     *,
 };
 
 use crate::app::FrillogramApp;
 
-/// The launch command the setup screen suggests; SETUP.md has the other ways.
-const RUN_WITH_PASS: &str =
-    "FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogram/api_hash) cargo run";
+/// The `[telegram]` section the setup screen suggests; SETUP.md has the other ways.
+const TELEGRAM_SECTION: &str = "[telegram]\napi_id = 12345\napi_hash_command = \"pass frillogram/api_hash\"";
 
 impl FrillogramApp {
     pub(crate) fn render_setup(&self, error: &ConfigError, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
+        // Messages span several lines, e.g. the file, then what's wrong in it.
+        let message = v_flex().text_color(cx.theme().danger).children(error.to_string().lines().map(str::to_string));
         let card = card(cx)
-            .child(div().text_xl().font_weight(FontWeight::BOLD).child("Frillogram can't start"))
-            .child(div().text_color(cx.theme().danger).child(error.to_string()));
+            .w(px(560.))
+            .child(mark(IconName::CircleAlert, cx.theme().danger.opacity(0.12), cx.theme().danger))
+            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Frillogram can't start"))
+            .child(message);
         let card = match error {
+            ConfigError::File(_) => card.child(div().text_color(muted).child(
+                "Fix the file and start Frillogram again. `frillogram --print-default-config` prints every key with \
+                 its default and allowed values, and SETUP.md’s “Configuration” explains them.",
+            )),
             ConfigError::Credentials(_) => card
                 .child(div().text_color(muted).child(
-                    "Create an app at my.telegram.org → API development tools, then start Frillogram with the \
-                     credentials set, for example from pass:",
+                    "Create an app at my.telegram.org → API development tools, then add its credentials to the \
+                     config file, for example with the api_hash kept in pass:",
                 ))
                 .child(
-                    div()
+                    v_flex()
                         .p_3()
-                        .rounded_md()
+                        .rounded(cx.theme().radius)
                         .bg(cx.theme().muted)
                         .font_family("monospace")
                         .text_sm()
-                        .child(RUN_WITH_PASS),
+                        .children(TELEGRAM_SECTION.lines()),
                 )
                 .child(div().text_color(muted).child(
-                    "SETUP.md also covers a private .env file. Avoid typing the hash itself on the command line, \
-                     where it stays in your shell history.",
+                    "SETUP.md also covers environment variables and a private .env file. Never put the hash itself \
+                     in the config file or on the command line.",
                 )),
             ConfigError::DataDir(_) => card.child(
                 div()
@@ -46,7 +55,7 @@ impl FrillogramApp {
                     .child("SETUP.md’s “Where data is kept” explains where Frillogram keeps its data."),
             ),
         };
-        centered(card)
+        centered(card, cx)
     }
 
     pub(crate) fn render_login(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -66,13 +75,18 @@ impl FrillogramApp {
             AuthStep::Closed => ("Disconnected", "Restart Frillogram to reconnect.".into(), None),
         };
 
-        let mut card = card(cx)
-            .child(div().text_xl().font_weight(FontWeight::BOLD).child(title))
-            .child(div().text_color(muted).child(hint));
+        let mut card =
+            card(cx).child(mark(Lucide::MessagesSquare, cx.theme().primary, cx.theme().primary_foreground)).child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .when(!hint.is_empty(), |text| text.child(div().text_sm().text_color(muted).child(hint))),
+            );
         if let Some(input) = input {
             card = card.child(Input::new(input)).child(
                 Button::new("login-next")
                     .primary()
+                    .w_full()
                     .label("Next")
                     .loading(self.busy)
                     .disabled(self.busy)
@@ -80,9 +94,9 @@ impl FrillogramApp {
             );
         }
         if let Some(error) = self.error.text() {
-            card = card.child(div().text_color(cx.theme().danger).child(error));
+            card = card.child(div().text_sm().text_color(cx.theme().danger).child(error));
         }
-        centered(card)
+        centered(card, cx)
     }
 
     pub(crate) fn focus_login_input(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -102,9 +116,32 @@ impl FrillogramApp {
 }
 
 fn card(cx: &mut Context<FrillogramApp>) -> Div {
-    v_flex().w(px(400.)).gap_3().p_6().rounded_lg().border_1().border_color(cx.theme().border).bg(cx.theme().secondary)
+    let theme = cx.theme();
+    v_flex()
+        .w(px(400.))
+        .gap_4()
+        .p_8()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover)
+        .text_color(theme.popover_foreground)
+        .shadow_lg()
 }
 
-fn centered(content: Div) -> Div {
-    div().size_full().flex().items_center().justify_center().child(content)
+/// A rounded square with `icon` at the top of a card.
+fn mark(icon: impl Into<Icon>, background: Hsla, foreground: Hsla) -> Div {
+    div()
+        .size_10()
+        .rounded_lg()
+        .bg(background)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(Icon::new(icon).with_size(px(20.)).text_color(foreground))
+}
+
+/// `content` in the middle of the window, on the sidebar's color so the card stands out.
+fn centered(content: Div, cx: &mut Context<FrillogramApp>) -> Div {
+    div().size_full().flex().items_center().justify_center().bg(cx.theme().sidebar).child(content)
 }

@@ -67,9 +67,11 @@ mod tests {
             sender: SenderId::User(1),
             date: id as i32,
             text: format!("m{id}"),
+            media: None,
             reply_to,
             outgoing: false,
             send_state: SendState::Sent,
+            can_be_saved: true,
         }
     }
 

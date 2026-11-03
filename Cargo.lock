@@ -1856,9 +1856,11 @@ dependencies = [
 name = "frillogram"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "chrono",
  "frillogram-core",
  "gpui-kit",
+ "image",
 ]
 
 [[package]]
@@ -1866,9 +1868,14 @@ name = "frillogram-core"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "base64 0.22.1",
+ "chrono",
  "dirs 6.0.0",
  "futures-executor",
+ "serde",
+ "shlex",
  "tdlib-rs",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

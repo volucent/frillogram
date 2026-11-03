@@ -8,9 +8,14 @@ repository.workspace = true
 
 [dependencies]
 async-channel = "2"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 dirs = "6"
 futures-executor = "0.3"
+serde = { version = "1", features = ["derive"] }
+shlex = "2"
 tdlib-rs = { version = "1.4", features = ["download-tdlib", "static"] }
+toml = "1"
 
 [build-dependencies]
 tdlib-rs = { version = "1.4", features = ["download-tdlib", "static"] }

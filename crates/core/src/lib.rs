@@ -2,8 +2,12 @@
 //! works with. Nothing in here knows about GPUI.
 
 mod client;
+pub mod config;
 mod model;
 pub mod threads;
 
-pub use client::{Config, ConfigError, Telegram};
-pub use model::{AuthStep, ChatSummary, Event, Msg, SendState, SenderId};
+pub use client::Telegram;
+pub use config::{Config, ConfigError, Loaded, Settings};
+pub use model::{
+    Animation, AuthStep, ChatSummary, Event, Media, Msg, Photo, SendState, SenderId, Thumbnail, ThumbnailFormat, Upload,
+};

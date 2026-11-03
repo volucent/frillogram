@@ -1,27 +1,39 @@
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    ops::Range,
+};
 
 use frillogram_core::{
-    AuthStep, ChatSummary, Config, ConfigError, Event, Msg, SendState, SenderId, Telegram,
+    AuthStep, ChatSummary, Config, ConfigError, Event, Msg, SendState, SenderId, Settings, Telegram,
+    config::ThemeChoice,
     threads::{self, Thread},
 };
 use gpui_kit::{
     component::{
-        ActiveTheme, Theme,
+        ActiveTheme,
         input::{InputEvent, InputState, TextareaState},
     },
     *,
 };
 
-/// How many recent messages to load when a chat is opened.
-const HISTORY_LIMIT: usize = 100;
+use crate::{
+    chat::{RowFacts, RowLook, row_looks},
+    media::MediaState,
+    theme,
+};
+
 /// How many chats to ask TDLib for per request after login.
 const CHAT_LIMIT: i32 = 200;
 /// The composers grow with their text up to this many lines, then scroll.
 const COMPOSER_MAX_ROWS: usize = 6;
 
 pub struct FrillogramApp {
+    /// What `config.toml` set, or the defaults if it has an error.
+    pub(crate) settings: Settings,
     pub(crate) tg: Option<Telegram>,
-    /// Set when the app can't start at all, e.g. API credentials are missing.
+    /// Set when the app can't start at all, e.g. API credentials are missing
+    /// or the config file has an error.
     pub(crate) setup_error: Option<ConfigError>,
     pub(crate) auth: AuthStep,
     pub(crate) error: ErrorBanner,
@@ -41,7 +53,7 @@ pub struct FrillogramApp {
     pub(crate) user_names: HashMap<i64, String>,
     pub(crate) selected_chat: Option<i64>,
     /// Unsent composer text of chats other than the selected one.
-    drafts: HashMap<i64, String>,
+    pub(crate) drafts: HashMap<i64, String>,
     /// Errors about sends from chats that were no longer selected when they
     /// failed, shown when the user comes back to them.
     pending_errors: HashMap<i64, Vec<String>>,
@@ -62,6 +74,8 @@ pub struct FrillogramApp {
     /// onto it once it arrives. `None` when no history is loading.
     changes_while_loading: Option<Vec<Event>>,
     pub(crate) threads: Vec<Thread>,
+    /// How each entry of `threads` groups with the one above it.
+    pub(crate) row_looks: Vec<RowLook>,
     /// One key per entry of `threads`, for diffing them by content.
     thread_keys: Vec<RowKey>,
     /// Root message id of the thread shown in the side panel.
@@ -73,13 +87,20 @@ pub struct FrillogramApp {
     /// The thread composer had focus last, not the main one, so dismissing
     /// an error gives focus back to it.
     pub(crate) thread_composer_focused_last: bool,
+    /// Downloads and GIF conversions of inline media.
+    pub(crate) media: MediaState,
 
     _subscriptions: Vec<Subscription>,
     _events: Option<Task<()>>,
 }
 
 impl FrillogramApp {
-    pub fn new(config: Result<Config, ConfigError>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        settings: Settings,
+        config: Result<Config, ConfigError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let phone_input = cx.new(|cx| InputState::new(window, cx).placeholder("+1 555 123 4567"));
         let code_input = cx.new(|cx| InputState::new(window, cx).placeholder("Login code"));
         let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
@@ -97,10 +118,13 @@ impl FrillogramApp {
         let thread_composer = composer("Reply in thread…", window, cx);
         let composer = composer("Message", window, cx);
 
-        Theme::sync_system_appearance(Some(window), cx);
+        theme::init(&settings.appearance, cx);
+        theme::apply(&settings.appearance, window, cx);
         let mut subscriptions = vec![
-            cx.observe_window_appearance(window, |_, window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
+            cx.observe_window_appearance(window, |this, window, cx| {
+                if this.settings.appearance.theme == ThemeChoice::System {
+                    theme::apply(&this.settings.appearance, window, cx);
+                }
             }),
             // Messages that arrived while the window was in the background
             // are read once the user comes back to it.
@@ -129,6 +153,7 @@ impl FrillogramApp {
             ));
         }
 
+        let media = MediaState::new(config.as_ref().ok().map(|config| config.data_dir.clone()));
         let (tg, setup_error, events) = match config {
             Ok(config) => {
                 let (tg, events) = Telegram::start(config);
@@ -147,6 +172,7 @@ impl FrillogramApp {
         });
 
         FrillogramApp {
+            settings,
             tg,
             setup_error,
             auth: AuthStep::Starting,
@@ -168,6 +194,7 @@ impl FrillogramApp {
             messages: Vec::new(),
             changes_while_loading: None,
             threads: Vec::new(),
+            row_looks: Vec::new(),
             thread_keys: Vec::new(),
             open_thread: None,
             message_list: ListState::new(0, ListAlignment::Bottom, px(600.)),
@@ -175,6 +202,7 @@ impl FrillogramApp {
             composer,
             thread_composer,
             thread_composer_focused_last: false,
+            media,
             _subscriptions: subscriptions,
             _events,
         }
@@ -213,6 +241,9 @@ impl FrillogramApp {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.title = title;
                 }
+                if self.selected_chat == Some(chat_id) {
+                    self.name_composer(window, cx);
+                }
             }
             Event::ChatLastMessage { chat_id, preview, order } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
@@ -246,12 +277,12 @@ impl FrillogramApp {
             Event::MessageSent { .. }
             | Event::MessageSendFailed { .. }
             | Event::MessagesDeleted { .. }
-            | Event::MessageText { .. } => {
+            | Event::MessageContent { .. } => {
                 let chat_id = match &event {
                     Event::MessageSent { message, .. } | Event::MessageSendFailed { message, .. } => {
                         Some(message.chat_id)
                     }
-                    Event::MessagesDeleted { chat_id, .. } | Event::MessageText { chat_id, .. } => Some(*chat_id),
+                    Event::MessagesDeleted { chat_id, .. } | Event::MessageContent { chat_id, .. } => Some(*chat_id),
                     _ => None,
                 };
                 let selected = chat_id.is_some() && chat_id == self.selected_chat;
@@ -263,6 +294,12 @@ impl FrillogramApp {
                     } else {
                         push_distinct(self.pending_errors.entry(message.chat_id).or_default(), error.clone());
                     }
+                }
+                // A pasted image's file has done its job once its message settled.
+                if let Event::MessageSent { old_id, message } | Event::MessageSendFailed { old_id, message, .. } =
+                    &event
+                {
+                    self.paste_settled(message.chat_id, *old_id, cx);
                 }
                 if self.apply_message_change(&event) {
                     self.rethread(window, cx);
@@ -283,8 +320,18 @@ impl FrillogramApp {
 
     /// Shows `error`, which is about `chat` if that's set, after any errors
     /// shown already.
-    fn show_error(&mut self, error: String, chat: Option<i64>) {
+    pub(crate) fn show_error(&mut self, error: String, chat: Option<i64>) {
         self.error.push(error, chat);
+    }
+
+    /// Shows an error about `chat_id`, or keeps it for when the user comes
+    /// back to that chat.
+    pub(crate) fn chat_error(&mut self, chat_id: i64, error: String) {
+        if self.selected_chat == Some(chat_id) {
+            self.show_error(error, Some(chat_id));
+        } else {
+            push_distinct(self.pending_errors.entry(chat_id).or_default(), error);
+        }
     }
 
     pub(crate) fn submit_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -354,6 +401,7 @@ impl FrillogramApp {
             }
             let draft = self.drafts.remove(&chat_id).unwrap_or_default();
             restore_text(&self.composer, draft, window, cx);
+            self.name_composer(window, cx);
         }
         self.load_generation += 1;
         let generation = self.load_generation;
@@ -361,6 +409,7 @@ impl FrillogramApp {
         self.messages.clear();
         self.changes_while_loading = Some(Vec::new());
         self.threads.clear();
+        self.row_looks.clear();
         self.thread_keys.clear();
         self.message_list.reset(0);
         self.open_thread = None;
@@ -373,6 +422,7 @@ impl FrillogramApp {
         // Only a chat that was actually opened is closed, so a load that
         // never got to open its chat can't close one opened elsewhere.
         let to_close = self.opened_chat.take();
+        let history_limit = self.settings.chats.history_limit as usize;
 
         cx.spawn_in(window, async move |this, cx| {
             if let Some(to_close) = to_close {
@@ -400,7 +450,7 @@ impl FrillogramApp {
             if !current {
                 return;
             }
-            let history = tg.history(chat_id, HISTORY_LIMIT).await;
+            let history = tg.history(chat_id, history_limit).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 if app.load_generation != generation {
                     return;
@@ -456,6 +506,9 @@ impl FrillogramApp {
         if self.open_thread != root_id {
             self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
         }
+        if self.open_thread.is_some() != root_id.is_some() {
+            self.panel_toggled();
+        }
         self.open_thread = root_id;
         if root_id.is_some() {
             self.thread_scroll.scroll_to_bottom();
@@ -467,6 +520,22 @@ impl FrillogramApp {
             self.composer.update(cx, |input, cx| input.focus(window, cx));
         }
         cx.notify();
+    }
+
+    /// The thread panel opens or closes, which changes the main list's width.
+    /// The list then measures every row again; this makes it keep the row at
+    /// its top at the same fraction of its height, which its new height may
+    /// not leave room for in pixels. `open_thread_from_row` first makes the
+    /// row that opens the panel the top one, at fraction 0.
+    fn panel_toggled(&self) {
+        self.message_list.remeasure();
+    }
+
+    /// Shows the selected chat's name in the empty composer.
+    fn name_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.selected_chat.and_then(|id| self.chats.get(&id)) else { return };
+        let placeholder = format!("Message {}", chat.title);
+        self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
     }
 
     /// The send state of the open thread's root, if it's loaded.
@@ -482,26 +551,7 @@ impl FrillogramApp {
         if text.is_empty() {
             return;
         }
-        // A thread reply is a plain Telegram reply to the thread's root.
-        // TDLib silently drops a reply to a message that hasn't reached the
-        // server and posts it to the whole chat, so the text stays here.
-        let reply_to = if in_thread {
-            let refusal = match self.thread_root_state() {
-                Some(SendState::Sent) => None,
-                Some(SendState::Failed) => Some("This message wasn't sent, so it can't be replied to."),
-                Some(SendState::Pending) | None => {
-                    Some("Wait until the message is sent before replying in its thread.")
-                }
-            };
-            if let Some(refusal) = refusal {
-                self.show_error(refusal.into(), Some(chat_id));
-                cx.notify();
-                return;
-            }
-            self.open_thread
-        } else {
-            None
-        };
+        let Some(reply_to) = self.reply_target(in_thread, chat_id, cx) else { return };
         input.update(cx, |input, cx| input.set_value("", window, cx));
 
         cx.spawn_in(window, async move |this, cx| {
@@ -514,16 +564,39 @@ impl FrillogramApp {
                         Restore::Drop => {}
                         Restore::Draft => park_draft(&mut app.drafts, chat_id, &text),
                     }
-                    if selected {
-                        app.show_error(error, Some(chat_id));
-                    } else {
-                        push_distinct(app.pending_errors.entry(chat_id).or_default(), error);
-                    }
+                    app.chat_error(chat_id, error);
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    /// What a send from the main or thread composer replies to: nothing, or
+    /// the open thread's root. `None` refuses the send, with the error shown.
+    pub(crate) fn reply_target(
+        &mut self,
+        in_thread: bool,
+        chat_id: i64,
+        cx: &mut Context<Self>,
+    ) -> Option<Option<i64>> {
+        if !in_thread {
+            return Some(None);
+        }
+        // A thread reply is a plain Telegram reply to the thread's root.
+        // TDLib silently drops a reply to a message that hasn't reached the
+        // server and posts it to the whole chat, so the text stays here.
+        let refusal = match self.thread_root_state() {
+            Some(SendState::Sent) => None,
+            Some(SendState::Failed) => Some("This message wasn't sent, so it can't be replied to."),
+            Some(SendState::Pending) | None => Some("Wait until the message is sent before replying in its thread."),
+        };
+        if let Some(refusal) = refusal {
+            self.show_error(refusal.into(), Some(chat_id));
+            cx.notify();
+            return None;
+        }
+        Some(self.open_thread)
     }
 
     /// Applies a sent, failed, deleted or edited message to the selected
@@ -557,10 +630,11 @@ impl FrillogramApp {
                 self.messages.retain(|m| !message_ids.contains(&m.id));
                 self.messages.len() != count
             }
-            Event::MessageText { chat_id, message_id, text } if selected(*chat_id) => {
+            Event::MessageContent { chat_id, message_id, text, media } if selected(*chat_id) => {
                 match self.messages.iter_mut().find(|m| m.id == *message_id) {
-                    Some(message) if message.text != *text => {
+                    Some(message) if message.text != *text || message.media != *media => {
                         message.text = text.clone();
+                        message.media = media.clone();
                         true
                     }
                     _ => false,
@@ -580,6 +654,7 @@ impl FrillogramApp {
         if let Some(root_id) = self.open_thread {
             self.open_thread = thread_root_of(root_id, &threads, &self.messages);
             if self.open_thread.is_none() {
+                self.panel_toggled();
                 if self.thread_composer.read(cx).focus_handle(cx).is_focused(window) {
                     self.composer.update(cx, |input, cx| input.focus(window, cx));
                 }
@@ -591,13 +666,28 @@ impl FrillogramApp {
         if self.open_thread.is_some() && offset.y <= -max.y + px(1.) {
             self.thread_scroll.scroll_to_bottom();
         }
+        let facts: Vec<RowFacts> = threads
+            .iter()
+            .map(|t| RowFacts::of(&self.messages[t.root], !t.replies.is_empty(), t.root_is_reply))
+            .collect();
+        let looks = row_looks(&facts, self.settings.chats.group_minutes);
         // Only replace the rows that changed, so the list keeps its scroll
         // position when a message arrives. `reset` is for switching chats.
-        let keys = row_keys(&threads, &self.messages);
+        let keys = row_keys(&threads, &self.messages, &looks);
         let (old_rows, new_count) = changed_rows(&self.thread_keys, &keys);
-        self.message_list.splice(old_rows, new_count);
+        if old_rows.len() == new_count {
+            // E.g. an edit. Unlike `splice`, this keeps the top row's offset
+            // when that's the one that changed, so the view doesn't jump.
+            if new_count > 0 {
+                self.message_list.remeasure_items(old_rows);
+            }
+        } else {
+            self.message_list.splice(old_rows, new_count);
+        }
         self.threads = threads;
+        self.row_looks = looks;
         self.thread_keys = keys;
+        self.fetch_media(cx);
     }
 
     pub(crate) fn sender_name(&self, sender: SenderId) -> String {
@@ -623,7 +713,7 @@ fn restore_text(input: &Entity<TextareaState>, text: String, window: &mut Window
 /// Puts the text of a failed send back into the composer it came from. Text
 /// typed there meanwhile comes first, as in `park_draft`, and keeps its caret
 /// and selection.
-fn restore_failed_text(input: &Entity<TextareaState>, text: String, window: &mut Window, cx: &mut App) {
+pub(crate) fn restore_failed_text(input: &Entity<TextareaState>, text: String, window: &mut Window, cx: &mut App) {
     let current = input.read(cx).value().to_string();
     if current.is_empty() {
         return restore_text(input, text, window, cx);
@@ -642,7 +732,7 @@ fn restore_failed_text(input: &Entity<TextareaState>, text: String, window: &mut
 /// Where the text of a failed send goes back to. Its error shows either way,
 /// right away or when the user returns to the chat.
 #[derive(Debug, PartialEq)]
-enum Restore {
+pub(crate) enum Restore {
     /// The composer it was sent from, after anything typed there meanwhile.
     Composer,
     /// Its chat's draft, for when that chat is no longer selected.
@@ -651,7 +741,7 @@ enum Restore {
     Drop,
 }
 
-fn restore_target(chat_selected: bool, in_thread: bool, thread_open: bool) -> Restore {
+pub(crate) fn restore_target(chat_selected: bool, in_thread: bool, thread_open: bool) -> Restore {
     if in_thread {
         // A thread reply only goes back to its own thread's composer. In the
         // main composer or draft, Enter would post it to the whole chat.
@@ -666,12 +756,17 @@ fn restore_target(chat_selected: bool, in_thread: bool, thread_open: bool) -> Re
 /// Whether the thread holding the reply target `reply_to` is still the open one.
 /// The panel may have followed its root into an older thread since the send,
 /// so this compares thread roots. A target that's no longer loaded is in none.
-fn reply_thread_open(reply_to: Option<i64>, open_thread: Option<i64>, threads: &[Thread], messages: &[Msg]) -> bool {
+pub(crate) fn reply_thread_open(
+    reply_to: Option<i64>,
+    open_thread: Option<i64>,
+    threads: &[Thread],
+    messages: &[Msg],
+) -> bool {
     reply_to.and_then(|id| thread_root_of(id, threads, messages)).is_some_and(|root| open_thread == Some(root))
 }
 
 /// Adds `text` to `chat_id`'s draft, after whatever was typed there since.
-fn park_draft(drafts: &mut HashMap<i64, String>, chat_id: i64, text: &str) {
+pub(crate) fn park_draft(drafts: &mut HashMap<i64, String>, chat_id: i64, text: &str) {
     let draft = drafts.entry(chat_id).or_default();
     let appendix = appendix(draft, text);
     draft.push_str(&appendix);
@@ -748,16 +843,45 @@ fn push_distinct(errors: &mut Vec<String>, error: String) {
     }
 }
 
-/// Identifies a message list row by content: its root id, reply ids and
-/// whether the root is a reply. `Thread` holds indices into `messages`, which
-/// shift whenever a message above is added or removed.
-type RowKey = (i64, Vec<i64>, bool);
+/// Identifies a message list row by content, so the list knows which rows
+/// to measure again. `Thread` holds indices into `messages`, which shift
+/// whenever a message above is added or removed, so this holds ids. Besides
+/// identity it holds whatever changes the row's height.
+#[derive(Debug, PartialEq)]
+struct RowKey {
+    root: i64,
+    replies: Vec<i64>,
+    root_is_reply: bool,
+    /// How it groups with the row above, e.g. after the row above is deleted.
+    look: RowLook,
+    /// The root's text and media size, which an edit changes.
+    content: u64,
+}
 
-fn row_keys(threads: &[Thread], messages: &[Msg]) -> Vec<RowKey> {
+fn row_keys(threads: &[Thread], messages: &[Msg], looks: &[RowLook]) -> Vec<RowKey> {
     threads
         .iter()
-        .map(|t| (messages[t.root].id, t.replies.iter().map(|&i| messages[i].id).collect(), t.root_is_reply))
+        .zip(looks)
+        .map(|(t, &look)| {
+            let root = &messages[t.root];
+            RowKey {
+                root: root.id,
+                replies: t.replies.iter().map(|&i| messages[i].id).collect(),
+                root_is_reply: t.root_is_reply,
+                look,
+                content: content_revision(root),
+            }
+        })
         .collect()
+}
+
+/// A hash of what an edit can change about a message's height: its text and
+/// whether it has media, and of what size. A hash, so keys don't copy every text.
+fn content_revision(message: &Msg) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    message.text.hash(&mut hasher);
+    message.media.as_ref().map(|media| media.size()).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The root id of the thread holding message `id`, if that's loaded.
@@ -806,12 +930,13 @@ mod tests {
     // Not `super::*`: GPUI's glob import brings its own `test` attribute.
     use std::collections::HashMap;
 
-    use frillogram_core::{ChatSummary, Msg, SendState, SenderId, threads};
+    use frillogram_core::{ChatSummary, Media, Msg, Photo, SendState, SenderId, threads};
 
     use super::{
         ErrorBanner, Restore, appendix, changed_rows, park_draft, reply_thread_open, restore_target, row_keys,
         settle_open, thread_root_of, visible_chats,
     };
+    use crate::chat::RowLook;
 
     #[test]
     fn identical_rows_change_nothing() {
@@ -844,17 +969,54 @@ mod tests {
             sender: SenderId::User(1),
             date: 0,
             text: String::new(),
+            media: None,
             reply_to,
             outgoing: false,
             send_state: SendState::Sent,
+            can_be_saved: true,
         };
         let before = [msg(1, None), msg(2, None), msg(3, Some(2)), msg(4, None)];
         let after = &before[1..];
-        let old = row_keys(&threads::group(&before), &before);
-        let new = row_keys(&threads::group(after), after);
+        let looks = [RowLook::default(); 3];
+        let old = row_keys(&threads::group(&before), &before, &looks);
+        let new = row_keys(&threads::group(after), after, &looks);
         // Deleting message 1 removes only its row, although every index moved.
         assert_eq!(changed_rows(&old, &new), (0..1, 0));
-        assert_eq!(new, vec![(2, vec![3], false), (4, vec![], false)]);
+        let ids: Vec<(i64, Vec<i64>)> = new.into_iter().map(|key| (key.root, key.replies)).collect();
+        assert_eq!(ids, vec![(2, vec![3]), (4, vec![])]);
+    }
+
+    #[test]
+    fn edited_roots_change_only_their_row() {
+        let msg = |id: i64, text: &str, media: Option<Media>| Msg {
+            id,
+            chat_id: 1,
+            sender: SenderId::User(1),
+            date: 0,
+            text: text.into(),
+            media,
+            reply_to: None,
+            outgoing: false,
+            send_state: SendState::Sent,
+            can_be_saved: true,
+        };
+        let photo = |file_id: i32, width: u32| {
+            Some(Media::Photo(Photo { file_id, width, height: 100, minithumbnail: None, has_spoiler: false }))
+        };
+        let keys = |messages: &[Msg]| row_keys(&threads::group(messages), messages, &[RowLook::default(); 3]);
+        let before = [msg(1, "a", None), msg(2, "b", photo(7, 100)), msg(3, "c", None)];
+        let old = keys(&before);
+        let edited = |i: usize, edit: Msg| {
+            let mut messages = before.clone();
+            messages[i] = edit;
+            changed_rows(&old, &keys(&messages))
+        };
+        assert_eq!(edited(1, msg(2, "b, edited", photo(7, 100))), (1..2, 1));
+        assert_eq!(edited(1, msg(2, "b", photo(7, 200))), (1..2, 1));
+        assert_eq!(edited(1, msg(2, "b", None)), (1..2, 1));
+        assert_eq!(edited(0, msg(1, "", None)), (0..1, 1));
+        // A new file of the same size, e.g. a re-upload, doesn't change the height.
+        assert_eq!(edited(1, msg(2, "b", photo(8, 100))), (3..3, 0));
     }
 
     #[test]
@@ -865,9 +1027,11 @@ mod tests {
             sender: SenderId::User(1),
             date: 0,
             text: String::new(),
+            media: None,
             reply_to,
             outgoing: false,
             send_state: SendState::Sent,
+            can_be_saved: true,
         };
         // 5 replies to 2, which isn't loaded yet, so it roots its own thread.
         let before = [msg(5, Some(2)), msg(6, Some(5))];
@@ -889,9 +1053,11 @@ mod tests {
             sender: SenderId::User(1),
             date: 0,
             text: String::new(),
+            media: None,
             reply_to,
             outgoing: false,
             send_state: SendState::Sent,
+            can_be_saved: true,
         };
         // The reply went to 5, then history brought in 2 and moved the thread to root 2.
         let messages = [msg(1, None), msg(2, None), msg(5, Some(2)), msg(6, Some(5))];
