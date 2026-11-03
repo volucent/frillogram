@@ -25,10 +25,157 @@ pub const EXAMPLE: &str = include_str!("../../../config.example.toml");
 pub struct Settings {
     pub telegram: TelegramSettings,
     pub appearance: Appearance,
+    pub colors: Colors,
     pub layout: Layout,
     pub time: Time,
     pub chats: Chats,
     pub media: MediaSettings,
+}
+
+/// `[colors.light]` and `[colors.dark]`: the palettes of the two themes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Colors {
+    pub light: Palette,
+    pub dark: Palette,
+}
+
+impl Default for Colors {
+    fn default() -> Self {
+        Colors { light: Palette::light(), dark: Palette::dark() }
+    }
+}
+
+/// The keys a palette in the file sets. A key left out takes its own
+/// theme's default, so a partial `[colors.dark]` stays dark.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PaletteFile {
+    background: Option<String>,
+    sidebar: Option<String>,
+    surface: Option<String>,
+    foreground: Option<String>,
+    muted: Option<String>,
+    border: Option<String>,
+    accent: Option<String>,
+    danger: Option<String>,
+    avatar_colors: Option<Vec<String>>,
+    avatar_text: Option<String>,
+}
+
+impl PaletteFile {
+    fn over(self, default: Palette) -> Palette {
+        Palette {
+            background: self.background.unwrap_or(default.background),
+            sidebar: self.sidebar.unwrap_or(default.sidebar),
+            surface: self.surface.unwrap_or(default.surface),
+            foreground: self.foreground.unwrap_or(default.foreground),
+            muted: self.muted.unwrap_or(default.muted),
+            border: self.border.unwrap_or(default.border),
+            accent: self.accent.unwrap_or(default.accent),
+            danger: self.danger.unwrap_or(default.danger),
+            avatar_colors: self.avatar_colors.unwrap_or(default.avatar_colors),
+            avatar_text: self.avatar_text.unwrap_or(default.avatar_text),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Colors {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct ColorsFile {
+            light: PaletteFile,
+            dark: PaletteFile,
+        }
+        let file = ColorsFile::deserialize(deserializer)?;
+        Ok(Colors { light: file.light.over(Palette::light()), dark: file.dark.over(Palette::dark()) })
+    }
+}
+
+/// One theme's colors, each a validated `#rrggbb`. The defaults are soft
+/// pastels without pure white or black, which are hard on sensitive eyes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Palette {
+    pub background: String,
+    pub sidebar: String,
+    pub surface: String,
+    pub foreground: String,
+    pub muted: String,
+    pub border: String,
+    pub accent: String,
+    pub danger: String,
+    pub avatar_colors: Vec<String>,
+    pub avatar_text: String,
+}
+
+impl Palette {
+    fn light() -> Self {
+        Palette {
+            background: "#f3eee6".into(),
+            sidebar: "#e9e3f0".into(),
+            surface: "#f8f4ee".into(),
+            foreground: "#3d3a4b".into(),
+            muted: "#77718a".into(),
+            border: "#dcd4cb".into(),
+            accent: "#c5b6f2".into(),
+            danger: "#b0505b".into(),
+            avatar_colors: ["#f5c6aa", "#f1b9c7", "#cdbff3", "#b6dfc6", "#b4d3f1", "#f2dea4", "#a9dbd7"]
+                .map(String::from)
+                .into(),
+            avatar_text: "#3d3a4b".into(),
+        }
+    }
+
+    fn dark() -> Self {
+        Palette {
+            background: "#2c2b36".into(),
+            sidebar: "#26252f".into(),
+            surface: "#35343f".into(),
+            foreground: "#d8d2e3".into(),
+            muted: "#9d97ae".into(),
+            border: "#403e4d".into(),
+            accent: "#b3a4e8".into(),
+            danger: "#e3949c".into(),
+            avatar_colors: ["#dfb197", "#dba5b3", "#b8abe0", "#a2cbb2", "#a0bfdd", "#dcc993", "#96c6c2"]
+                .map(String::from)
+                .into(),
+            avatar_text: "#2c2b36".into(),
+        }
+    }
+
+    fn validate(&self, section: &str) -> Result<(), Invalid> {
+        let colors = [
+            ("background", &self.background),
+            ("sidebar", &self.sidebar),
+            ("surface", &self.surface),
+            ("foreground", &self.foreground),
+            ("muted", &self.muted),
+            ("border", &self.border),
+            ("accent", &self.accent),
+            ("danger", &self.danger),
+            ("avatar_text", &self.avatar_text),
+        ];
+        for (key, color) in colors {
+            if !is_hex_color(color) {
+                return Err(invalid(
+                    section,
+                    key,
+                    format!("{color:?} isn't a color. Use \"#rrggbb\", e.g. \"#c5b6f2\"."),
+                ));
+            }
+        }
+        if self.avatar_colors.is_empty() {
+            return Err(invalid(section, "avatar_colors", "is empty. List at least one \"#rrggbb\" color."));
+        }
+        if let Some(color) = self.avatar_colors.iter().find(|color| !is_hex_color(color)) {
+            return Err(invalid(
+                section,
+                "avatar_colors",
+                format!("{color:?} isn't a color. List colors as \"#rrggbb\", e.g. [\"#f5c6aa\", \"#b4d3f1\"]."),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `[telegram]`, as written in the file. [`Config`] is what it resolves to.
@@ -200,6 +347,8 @@ impl Settings {
     fn validate(&self) -> Result<(), Invalid> {
         self.telegram.validate()?;
         self.appearance.validate()?;
+        self.colors.light.validate("colors.light")?;
+        self.colors.dark.validate("colors.dark")?;
         self.layout.validate()?;
         self.time.validate()?;
         self.chats.validate()?;
@@ -227,7 +376,9 @@ impl Appearance {
             return Err(invalid(
                 "appearance",
                 "accent",
-                format!("{accent:?} isn't a color. Use \"#rrggbb\", for example \"#2563eb\", or \"\" for the theme's."),
+                format!(
+                    "{accent:?} isn't a color. Use \"#rrggbb\", for example \"#2563eb\", or \"\" for the palettes'."
+                ),
             ));
         }
         if let Some(family) = &self.font_family
@@ -979,6 +1130,10 @@ mod tests {
             density = "compact"
             avatar_size = 28
 
+            [colors.dark]
+            background = "#202028"
+            avatar_colors = ["#aabbcc"]
+
             [layout]
             window_width = 1000
             window_height = 700
@@ -1017,6 +1172,15 @@ mod tests {
                     density: Density::Compact,
                     avatar_size: 28,
                 },
+                // A partial dark palette keeps the dark defaults, not the light ones.
+                colors: Colors {
+                    light: Palette::light(),
+                    dark: Palette {
+                        background: "#202028".into(),
+                        avatar_colors: vec!["#aabbcc".into()],
+                        ..Palette::dark()
+                    },
+                },
                 layout: Layout { window_width: 1000, window_height: 700, sidebar_width: 250, thread_panel_width: 350 },
                 time: Time {
                     today_format: "%H:%M:%S".into(),
@@ -1038,6 +1202,18 @@ mod tests {
     }
 
     #[test]
+    fn palette_colors_are_checked() {
+        assert_eq!(
+            file_error("[colors.light]\nbackground = \"white\"\n"),
+            " ([colors.light] background):\n\"white\" isn't a color. Use \"#rrggbb\", e.g. \"#c5b6f2\"."
+        );
+        assert!(file_error("[colors.dark]\navatar_colors = []\n").contains("([colors.dark] avatar_colors):\nis empty"));
+        assert!(file_error("[colors.dark]\navatar_colors = [\"#abc\"]\n").contains("[colors.dark] avatar_colors"));
+        assert!(file_error("[colors.dark]\nbackgrund = \"#000000\"\n").contains("unknown field `backgrund`"));
+        assert!(file_error("[colors.sepia]\n").contains("unknown field `sepia`"));
+    }
+
+    #[test]
     fn missing_keys_keep_their_defaults() {
         let settings = file_settings("[layout]\nsidebar_width = 200\n").unwrap();
         assert_eq!(settings.layout, Layout { sidebar_width: 200, ..Layout::default() });
@@ -1053,9 +1229,9 @@ mod tests {
              `window_width`, `window_height`, `sidebar_width`, `thread_panel_width`"
         );
         assert_eq!(
-            file_error("[colors]\n"),
-            ", line 1, column 2:\nunknown field `colors`, expected one of `telegram`, `appearance`, `layout`, `time`, \
-             `chats`, `media`"
+            file_error("[colours]\n"),
+            ", line 1, column 2:\nunknown field `colours`, expected one of `telegram`, `appearance`, `colors`, \
+             `layout`, `time`, `chats`, `media`"
         );
         assert!(file_error("font_size = 12\n").contains("(font_size):\nunknown field `font_size`"));
     }

@@ -42,6 +42,8 @@ pub struct FrillogramApp {
     pub(crate) phone_input: Entity<InputState>,
     pub(crate) code_input: Entity<InputState>,
     pub(crate) password_input: Entity<InputState>,
+    /// Filters the chat list by title.
+    pub(crate) chat_search: Entity<InputState>,
 
     pub(crate) chats: HashMap<i64, ChatSummary>,
     /// Ids of the chats shown in the chat list, in display order. Kept here
@@ -50,6 +52,8 @@ pub struct FrillogramApp {
     /// `visible_chats` is out of date. Chat updates arrive by the thousand
     /// after login, so it's rebuilt once before the next render, not per update.
     chats_dirty: bool,
+    /// What the chat search holds, lowercased and trimmed.
+    chat_query: String,
     pub(crate) user_names: HashMap<i64, String>,
     pub(crate) selected_chat: Option<i64>,
     /// Unsent composer text of chats other than the selected one.
@@ -89,6 +93,8 @@ pub struct FrillogramApp {
     pub(crate) thread_composer_focused_last: bool,
     /// Downloads and GIF conversions of inline media.
     pub(crate) media: MediaState,
+    /// A header was pressed on macOS, so the next drag moves the window.
+    pub(crate) moving_window: bool,
 
     _subscriptions: Vec<Subscription>,
     _events: Option<Task<()>>,
@@ -104,6 +110,7 @@ impl FrillogramApp {
         let phone_input = cx.new(|cx| InputState::new(window, cx).placeholder("+1 555 123 4567"));
         let code_input = cx.new(|cx| InputState::new(window, cx).placeholder("Login code"));
         let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
+        let chat_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats"));
         // Enter sends, Shift+Enter starts a new line.
         let composer = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
@@ -118,7 +125,7 @@ impl FrillogramApp {
         let thread_composer = composer("Reply in thread…", window, cx);
         let composer = composer("Message", window, cx);
 
-        theme::init(&settings.appearance, cx);
+        theme::init(&settings.appearance, &settings.colors, cx);
         theme::apply(&settings.appearance, window, cx);
         let mut subscriptions = vec![
             cx.observe_window_appearance(window, |this, window, cx| {
@@ -141,6 +148,22 @@ impl FrillogramApp {
                 }
             }));
         }
+        subscriptions.push(cx.subscribe_in(&chat_search, window, |this, input, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::Change => {
+                    this.chat_query = input.read(cx).value().trim().to_lowercase();
+                    this.chats_dirty = true;
+                    cx.notify();
+                }
+                // Enter opens the first match, so a chat is a few keys away.
+                InputEvent::PressEnter { .. } => {
+                    if let Some(&chat_id) = this.visible_chats.first() {
+                        this.select_chat(chat_id, window, cx);
+                    }
+                }
+                _ => {}
+            }
+        }));
         for (input, in_thread) in [(&composer, false), (&thread_composer, true)] {
             subscriptions.push(cx.subscribe_in(
                 input,
@@ -148,6 +171,8 @@ impl FrillogramApp {
                 move |this, _, event: &InputEvent, window, cx| match event {
                     InputEvent::PressEnter { shift: false, .. } => this.send_from_composer(in_thread, window, cx),
                     InputEvent::Focus => this.thread_composer_focused_last = in_thread,
+                    // The send button lights up once there's text.
+                    InputEvent::Change => cx.notify(),
                     _ => {}
                 },
             ));
@@ -181,9 +206,11 @@ impl FrillogramApp {
             phone_input,
             code_input,
             password_input,
+            chat_search,
             chats: HashMap::new(),
             visible_chats: Vec::new(),
             chats_dirty: false,
+            chat_query: String::new(),
             user_names: HashMap::new(),
             selected_chat: None,
             drafts: HashMap::new(),
@@ -203,6 +230,7 @@ impl FrillogramApp {
             thread_composer,
             thread_composer_focused_last: false,
             media,
+            moving_window: false,
             _subscriptions: subscriptions,
             _events,
         }
@@ -544,7 +572,7 @@ impl FrillogramApp {
         self.messages.iter().find(|m| m.id == root_id).map(|m| m.send_state)
     }
 
-    fn send_from_composer(&mut self, in_thread: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn send_from_composer(&mut self, in_thread: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(tg), Some(chat_id)) = (self.tg, self.selected_chat) else { return };
         let input = if in_thread { self.thread_composer.clone() } else { self.composer.clone() };
         let text = input.read(cx).value().trim().to_string();
@@ -900,11 +928,16 @@ fn changed_rows<T: PartialEq>(old: &[T], new: &[T]) -> (Range<usize>, usize) {
     (prefix..old.len() - suffix, new.len() - prefix - suffix)
 }
 
-/// Ids of the chats to list, in Telegram's order.
-fn visible_chats(chats: &HashMap<i64, ChatSummary>) -> Vec<i64> {
+/// Ids of the chats to list, in Telegram's order, whose titles contain
+/// `query` (lowercase; "" lists all).
+fn visible_chats(chats: &HashMap<i64, ChatSummary>, query: &str) -> Vec<i64> {
     // Channels stay hidden until sponsored messages are shown, which
     // Telegram's API terms require for any client that displays channels.
-    let mut visible: Vec<&ChatSummary> = chats.values().filter(|c| c.order > 0 && !c.is_channel).collect();
+    let mut visible: Vec<&ChatSummary> = chats
+        .values()
+        .filter(|c| c.order > 0 && !c.is_channel)
+        .filter(|c| query.is_empty() || c.title.to_lowercase().contains(query))
+        .collect();
     visible.sort_by_key(|c| std::cmp::Reverse((c.order, c.id)));
     visible.into_iter().map(|c| c.id).collect()
 }
@@ -912,7 +945,7 @@ fn visible_chats(chats: &HashMap<i64, ChatSummary>) -> Vec<i64> {
 impl Render for FrillogramApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.chats_dirty) {
-            self.visible_chats = visible_chats(&self.chats);
+            self.visible_chats = visible_chats(&self.chats, &self.chat_query);
         }
         let body = if let Some(error) = &self.setup_error {
             self.render_setup(error, cx).into_any_element()
@@ -1076,7 +1109,20 @@ mod tests {
             (id, ChatSummary { id, title: String::new(), last_message: None, unread: 0, order, is_channel })
         };
         let chats = HashMap::from([chat(1, 5, false), chat(2, 9, false), chat(3, 7, true), chat(4, 0, false)]);
-        assert_eq!(visible_chats(&chats), vec![2, 1]);
+        assert_eq!(visible_chats(&chats, ""), vec![2, 1]);
+    }
+
+    #[test]
+    fn chat_search_matches_titles_ignoring_case() {
+        let chat = |id: i64, title: &str| {
+            let summary =
+                ChatSummary { id, title: title.into(), last_message: None, unread: 0, order: id, is_channel: false };
+            (id, summary)
+        };
+        let chats = HashMap::from([chat(1, "Design Team"), chat(2, "Ada Lovelace"), chat(3, "Team Ünal")]);
+        assert_eq!(visible_chats(&chats, "team"), vec![3, 1]);
+        assert_eq!(visible_chats(&chats, "ün"), vec![3]);
+        assert!(visible_chats(&chats, "zzz").is_empty());
     }
 
     #[test]

@@ -37,8 +37,10 @@ Then `cargo run`. Environment variables work too, and SETUP.md covers them.
 
 ## Configuration
 
-Everything you can change (theme, accent color, font, sizes, time formats, how much history to load, how
-photos and GIFs load and which programs open and convert them) is a key in that one file, and every key has a default, so the file is optional.
+Everything you can change (theme, every color of the light and dark palettes, font, sizes, time formats,
+how much history to load, how photos and GIFs load and which programs open and convert them) is a key in
+that one file, and every key has a default, so the file is optional. The default palettes are soft
+pastels, with no pure white or black anywhere, to be easy on the eyes.
 [`config.example.toml`](config.example.toml) lists them all, and [SETUP.md](SETUP.md#configuration) says
 where the file goes and how it's read.
 
@@ -51,7 +53,7 @@ where the file goes and how it's read.
 
 ## Status
 
-Early. Works: phone, code and two-step password login; chat list; the latest messages of a chat (100 by
+Early. Works: phone, code and two-step password login; chat list, searchable by name; the latest messages of a chat (100 by
 default), grouped into threads; sending messages and thread replies; photos and GIFs shown inline, and
 sending images by attaching, dropping or pasting them. Only photos and GIFs render inline: video, voice
 messages, files and stickers keep their `[Video]`-style labels. Telegram stores most GIFs as silent MP4s,

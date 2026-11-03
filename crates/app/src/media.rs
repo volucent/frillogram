@@ -19,7 +19,7 @@ use frillogram_core::{Animation, Media, Msg, Upload, config::MediaSettings};
 use gpui_kit::{
     assets::IconName as Lucide,
     component::{
-        ActiveTheme, Icon, Sizable, ThemeStyled,
+        ActiveTheme, Disableable, Icon, Sizable, ThemeStyled,
         button::{Button, ButtonVariants},
         h_flex,
         input::Textarea,
@@ -991,6 +991,8 @@ impl FrillogramApp {
         let (width, height) = fit(width, height, settings.max_width, settings.max_height);
         let view = self.media.message_view(message, settings)?;
         let (muted, muted_fg, radius) = (cx.theme().muted, cx.theme().muted_foreground, cx.theme().radius_lg);
+        // Badges over an image use the palette, softened, not black and white.
+        let (overlay, overlay_fg) = (cx.theme().popover.opacity(0.88), cx.theme().foreground);
         let minithumbnail =
             media.minithumbnail().map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes.to_vec())));
 
@@ -1040,7 +1042,7 @@ impl FrillogramApp {
                 .when(load_hint, |media| {
                     media.child(div().absolute().inset_0().child(render_media_label("Click to load", muted_fg)))
                 })
-                .children(view.badge.map(render_badge))
+                .children(view.badge.map(|badge| render_badge(badge, overlay, overlay_fg)))
                 // Telegram's "restrict saving content": it never leaves the app.
                 .when(!message.can_be_saved, |media| {
                     media.child(
@@ -1050,14 +1052,20 @@ impl FrillogramApp {
                             .right_2()
                             .p_0p5()
                             .rounded_sm()
-                            .bg(hsla(0., 0., 0., 0.6))
-                            .child(Icon::new(Lucide::Lock).xsmall().text_color(white())),
+                            .bg(overlay)
+                            .child(Icon::new(Lucide::Lock).xsmall().text_color(overlay_fg)),
                     )
                 })
                 .when(view.loading, |media| {
-                    media.child(div().absolute().inset_0().flex().items_center().justify_center().child(
-                        div().p_1().rounded_full().bg(hsla(0., 0., 0., 0.6)).child(Spinner::new().color(white())),
-                    ))
+                    media.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().p_1().rounded_full().bg(overlay).child(Spinner::new().color(overlay_fg))),
+                    )
                 })
                 .into_any_element(),
         )
@@ -1074,8 +1082,9 @@ impl FrillogramApp {
             let Some(image) = pasted_image(item) else { return false };
             this.update(cx, |app, cx| app.send_pasted_image(image, in_thread, window, cx)).is_ok()
         });
+        let has_text = !input.read(cx).value().trim().is_empty();
         let theme = cx.theme();
-        let (border, background, radius) = (theme.input, theme.background, theme.radius_lg);
+        let (border, surface, radius) = (theme.input, theme.popover, theme.radius_lg * 1.5);
         h_flex()
             .items_end()
             .gap_1()
@@ -1083,7 +1092,8 @@ impl FrillogramApp {
             .rounded(radius)
             .border_1()
             .border_color(border)
-            .bg(background)
+            .bg(surface)
+            .shadow_xs()
             .when(focused, |composer| composer.focus_ring_style(window, cx))
             .child(
                 Button::new(if in_thread { "attach-in-thread" } else { "attach" })
@@ -1096,6 +1106,20 @@ impl FrillogramApp {
                     .on_click(cx.listener(move |this, _, window, cx| this.pick_files(in_thread, window, cx))),
             )
             .child(div().flex_1().min_w_0().child(textarea))
+            .child(
+                // Enter sends too; the button makes that discoverable and
+                // lights up once there's something to send.
+                Button::new(if in_thread { "send-in-thread" } else { "send" })
+                    .when(has_text, |button| button.primary())
+                    .when(!has_text, |button| button.ghost())
+                    .small()
+                    .icon(Lucide::ArrowUp)
+                    .tooltip("Send (Enter; Shift+Enter for a new line)")
+                    .disabled(!has_text)
+                    .mb(px(4.))
+                    .mr(px(2.))
+                    .on_click(cx.listener(move |this, _, window, cx| this.send_from_composer(in_thread, window, cx))),
+            )
     }
 }
 
@@ -1130,15 +1154,15 @@ fn render_media_label(text: &str, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-fn render_badge(badge: Badge) -> impl IntoElement {
+fn render_badge(badge: Badge, background: Hsla, foreground: Hsla) -> impl IntoElement {
     div()
         .absolute()
         .left_2()
         .bottom_2()
         .px_1p5()
         .rounded_sm()
-        .bg(hsla(0., 0., 0., 0.6))
-        .text_color(white())
+        .bg(background)
+        .text_color(foreground)
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
         .child(match badge {

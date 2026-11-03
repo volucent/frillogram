@@ -8,7 +8,7 @@ use std::ops::Range;
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use frillogram_core::{
     Msg, SendState, SenderId,
-    config::{Appearance, Density, Time},
+    config::{Appearance, Density, Palette, Time},
     threads::Thread,
 };
 use gpui_kit::{
@@ -16,13 +16,15 @@ use gpui_kit::{
     component::{
         ActiveTheme, Icon, IconName, Sizable, ThemeStyled,
         button::{Button, ButtonVariants},
-        h_flex, v_flex,
+        h_flex,
+        input::Input,
+        v_flex,
     },
     prelude::FluentBuilder,
     *,
 };
 
-use crate::app::FrillogramApp;
+use crate::{app::FrillogramApp, theme};
 
 /// The hover group of a main list row, whose action bar shows while it's hovered.
 const ROW_GROUP: &str = "message-row";
@@ -44,6 +46,8 @@ const TEXT_SM: f32 = 0.875;
 const TEXT_LG: f32 = 1.125;
 /// Height of the unread badge in the chat list.
 const BADGE_HEIGHT: Pixels = px(20.);
+/// Room the macOS window buttons take at the left of the chat list header.
+const TRAFFIC_LIGHTS: Pixels = px(90.);
 
 /// Sizes that `[appearance]` decides.
 #[derive(Clone, Copy)]
@@ -142,6 +146,15 @@ impl FrillogramApp {
         .flex_1();
 
         let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let searching = !self.chat_search.read(cx).value().trim().is_empty();
+        let list = if self.visible_chats.is_empty() {
+            let note = if searching { "No chats match your search." } else { "No chats yet." };
+            div().flex_1().px_6().py_8().text_sm().text_center().text_color(muted).child(note).into_any_element()
+        } else {
+            rows.into_any_element()
+        };
+        let theme = cx.theme();
         v_flex()
             .w(px(self.settings.layout.sidebar_width as f32))
             .h_full()
@@ -152,14 +165,22 @@ impl FrillogramApp {
             .text_color(theme.sidebar_foreground)
             .child(
                 h_flex()
+                    .id("chat-list-header")
                     .h(metrics.header)
                     .flex_none()
                     .px_4()
-                    .border_b_1()
-                    .border_color(theme.sidebar_border)
+                    .when(cfg!(target_os = "macos"), |header| header.pl(TRAFFIC_LIGHTS))
+                    .map(|area| drags_window(area, cx))
                     .child(header_title().font_weight(FontWeight::BOLD).child("Chats")),
             )
-            .child(rows)
+            .child(
+                div().flex_none().px_3().pb_2().child(
+                    Input::new(&self.chat_search)
+                        .prefix(Icon::new(Lucide::Search).small().text_color(muted))
+                        .cleanable(true),
+                ),
+            )
+            .child(list)
     }
 
     fn render_chat_row(&self, ix: usize, metrics: Metrics, cx: &mut Context<Self>) -> AnyElement {
@@ -167,23 +188,33 @@ impl FrillogramApp {
             return div().into_any_element();
         };
         let theme = cx.theme();
-        // Tints of the accent, which are greys when no accent is set.
-        let (selected_bg, hover_bg) = (theme.primary.opacity(0.12), theme.primary.opacity(0.06));
-        let (muted, primary, primary_fg, radius) =
-            (theme.muted_foreground, theme.primary, theme.primary_foreground, theme.radius_lg);
+        let palette = theme::palette(&self.settings.colors, cx);
+        let (hover_bg, radius) = (theme.sidebar_accent, theme.radius_lg);
 
         let chat_id = chat.id;
         let selected = self.selected_chat == Some(chat_id);
+        let unread = chat.unread > 0;
+        // The selected chat is filled with the accent, so it's easy to spot;
+        // its text and badge flip to stay readable on it.
+        let (title_color, preview_color, badge_bg, badge_fg) = if selected {
+            (theme.primary_foreground, theme.primary_foreground.opacity(0.8), theme.background, theme.foreground)
+        } else if unread {
+            (theme.foreground, theme.foreground.opacity(0.85), theme.primary, theme.primary_foreground)
+        } else {
+            (theme.foreground, theme.muted_foreground, theme.primary, theme.primary_foreground)
+        };
         let mut title_row = h_flex().h(metrics.chat_title).gap_2().child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(title_color)
+                // Unread chats stand out by weight too, not only by the badge.
+                .font_weight(if unread { FontWeight::BOLD } else { FontWeight::MEDIUM })
                 .line_height(relative(CHAT_LINE_HEIGHT))
                 .child(chat.title.clone()),
         );
-        if chat.unread > 0 {
+        if unread {
             title_row = title_row.child(
                 div()
                     .flex_none()
@@ -191,8 +222,8 @@ impl FrillogramApp {
                     .h(BADGE_HEIGHT)
                     .px_1p5()
                     .rounded_full()
-                    .bg(primary)
-                    .text_color(primary_fg)
+                    .bg(badge_bg)
+                    .text_color(badge_fg)
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .flex()
@@ -216,11 +247,12 @@ impl FrillogramApp {
                     .px_2()
                     .py(metrics.chat_y)
                     .rounded(radius)
-                    .when(selected, |row| row.bg(selected_bg))
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme.primary))
                     // The hover color would hide the selection.
                     .when(!selected, |row| row.hover(move |row| row.bg(hover_bg)))
                     .on_click(cx.listener(move |this, _, window, cx| this.select_chat(chat_id, window, cx)))
-                    .child(avatar(&chat.title, chat_id, metrics.avatar))
+                    .child(avatar(&chat.title, chat_id, metrics.avatar, palette))
                     .child(
                         v_flex().flex_1().min_w_0().gap_0p5().child(title_row).child(
                             div()
@@ -228,7 +260,7 @@ impl FrillogramApp {
                                 .truncate()
                                 .text_sm()
                                 .line_height(relative(CHAT_LINE_HEIGHT))
-                                .text_color(muted)
+                                .text_color(preview_color)
                                 .child(chat.last_message.clone().unwrap_or_default()),
                         ),
                     ),
@@ -247,6 +279,7 @@ impl FrillogramApp {
             return self.render_no_chat(cx).into_any_element();
         };
         let border = cx.theme().border;
+        let palette = theme::palette(&self.settings.colors, cx);
 
         let list = list(
             self.message_list.clone(),
@@ -262,13 +295,15 @@ impl FrillogramApp {
             .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().drop_target))
             .child(
                 h_flex()
+                    .id("chat-header")
                     .h(metrics.header)
                     .flex_none()
                     .px_4()
                     .gap_3()
                     .border_b_1()
                     .border_color(border)
-                    .child(avatar(&chat.title, chat.id, metrics.avatar))
+                    .map(|area| drags_window(area, cx))
+                    .child(avatar(&chat.title, chat.id, metrics.avatar, palette))
                     .child(
                         header_title()
                             .flex_1()
@@ -292,24 +327,33 @@ impl FrillogramApp {
     fn render_no_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         v_flex()
+            .id("no-chat")
             .flex_1()
             .min_w_0()
             .h_full()
             .items_center()
             .justify_center()
             .gap_3()
+            .map(|area| drags_window(area, cx))
             .child(
                 div()
-                    .size_16()
+                    .size_20()
+                    .mb_2()
                     .rounded_full()
-                    .bg(theme.muted)
+                    .bg(theme.primary.opacity(0.35))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(Lucide::MessagesSquare).with_size(px(28.)).text_color(theme.muted_foreground)),
+                    .child(Icon::new(Lucide::MessagesSquare).with_size(px(34.)).text_color(theme.foreground)),
             )
-            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("No chat open"))
-            .child(div().text_sm().text_color(theme.muted_foreground).child("Pick a chat from the list to read it."))
+            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Pick a chat"))
+            .child(
+                div()
+                    .max_w(px(320.))
+                    .text_center()
+                    .text_color(theme.muted_foreground)
+                    .child("Choose one from the list, or search for it by name and press Enter."),
+            )
             .children(self.render_error(cx))
     }
 
@@ -379,7 +423,8 @@ impl FrillogramApp {
                 .child(div().pl(m.avatar + px(12.)).text_xs().text_color(muted).child("↪ reply to an earlier message"));
         }
         let summary = (!thread.replies.is_empty())
-            .then(|| self.render_thread_summary(thread, root_id, today, cx).into_any_element());
+            // In a row, so the pill is as wide as its text, not the message.
+            .then(|| h_flex().child(self.render_thread_summary(thread, root_id, today, cx)).into_any_element());
         row = row.child(self.render_message(root, look.continued, ROW_GROUP, today, m, summary, cx));
 
         // A message without replies starts a thread from its action bar. TDLib
@@ -432,8 +477,8 @@ impl FrillogramApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let (link, muted, background, border, radius) =
-            (theme.primary, theme.muted_foreground, theme.background, theme.border, theme.radius);
+        let palette = theme::palette(&self.settings.colors, cx);
+        let (text, muted, tint, radius) = (theme.foreground, theme.muted_foreground, theme.primary, theme.radius_lg);
         let count = thread.replies.len();
         let label = if count == 1 { "1 reply".to_string() } else { format!("{count} replies") };
         let last = thread.replies.last().map(|&i| self.messages[i].date).unwrap_or_default();
@@ -443,25 +488,24 @@ impl FrillogramApp {
         h_flex()
             .id(("thread", root_id as u64))
             .group(SUMMARY_GROUP)
-            .mt_1()
+            .mt_1p5()
             // The padding is pulled back out, so the avatars line up with the text.
             .ml(px(-6.))
             .max_w(px(520.))
             .gap_2()
-            .px(px(5.))
-            .py(px(3.))
+            .px(px(6.))
+            .py(px(4.))
             .rounded(radius)
-            // Always there, so the hover color doesn't change the size.
-            .border_1()
-            .border_color(transparent_black())
+            // A soft accent tint says it's clickable before it's hovered.
+            .bg(tint.opacity(0.22))
             .cursor_pointer()
-            .hover(move |summary| summary.bg(background).border_color(border))
+            .hover(move |summary| summary.bg(tint.opacity(0.4)))
             .on_click(cx.listener(move |this, _, window, cx| this.open_thread_from_row(root_id, window, cx)))
             .child(h_flex().flex_none().gap_0p5().children(repliers.into_iter().map(|sender| {
                 let id = sender_id(sender);
-                avatar(&self.sender_name(sender), id, px(20.))
+                avatar(&self.sender_name(sender), id, px(20.), palette)
             })))
-            .child(div().flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(link).child(label))
+            .child(div().flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(text).child(label))
             .child(
                 div()
                     .min_w_0()
@@ -470,7 +514,6 @@ impl FrillogramApp {
                     .text_color(muted)
                     .child(format!("Last reply {}", format_time(last, today, &self.settings.time))),
             )
-            .child(div().flex_1())
             .child(
                 div()
                     .flex_none()
@@ -488,7 +531,7 @@ impl FrillogramApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (border, muted) = (cx.theme().border, cx.theme().muted_foreground);
+        let (border, muted, panel_bg) = (cx.theme().border, cx.theme().muted_foreground, cx.theme().popover);
         let chat_title = self.selected_chat.and_then(|id| self.chats.get(&id)).map(|c| c.title.clone());
         let mut messages =
             v_flex().id("thread-messages").flex_1().overflow_y_scroll().track_scroll(&self.thread_scroll).py_2();
@@ -532,8 +575,11 @@ impl FrillogramApp {
             }))
             .border_l_1()
             .border_color(border)
+            // The surface color sets the panel apart from the chat beside it.
+            .bg(panel_bg)
             .child(
                 h_flex()
+                    .id("thread-header")
                     .h(m.header)
                     .flex_none()
                     .pl_4()
@@ -541,6 +587,7 @@ impl FrillogramApp {
                     .gap_2()
                     .border_b_1()
                     .border_color(border)
+                    .map(|area| drags_window(area, cx))
                     .child(header_title().flex_none().font_weight(FontWeight::SEMIBOLD).child("Thread"))
                     .child(div().flex_1().min_w_0().truncate().text_sm().text_color(muted).children(chat_title))
                     .child(
@@ -623,7 +670,8 @@ impl FrillogramApp {
                 .child(format_clock(message.date, &self.settings.time))
         } else {
             let name = self.sender_name(message.sender);
-            div().flex_none().pt(px(2.)).child(avatar(&name, sender_id(message.sender), m.avatar))
+            let palette = theme::palette(&self.settings.colors, cx);
+            div().flex_none().pt(px(2.)).child(avatar(&name, sender_id(message.sender), m.avatar, palette))
         };
 
         let mut content = v_flex().flex_1().min_w_0();
@@ -684,6 +732,36 @@ fn pin_to_top(list: &ListState, ix: usize) {
     list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
 }
 
+/// Makes `area` move the window like the macOS title bar it stands in for:
+/// dragging it moves the window and a double click zooms it. A button in it
+/// prevents the default on press, so it keeps its click. The move starts on
+/// the first motion after the press, as gpui-component's own title bar does,
+/// so a plain click never hands the mouse to AppKit.
+pub(crate) fn drags_window<E: InteractiveElement>(area: E, cx: &Context<FrillogramApp>) -> E {
+    if !cfg!(target_os = "macos") {
+        return area;
+    }
+    area.on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|this, event: &MouseDownEvent, window, _| {
+            if window.default_prevented() {
+                return;
+            }
+            if event.click_count == 2 {
+                window.titlebar_double_click();
+            } else {
+                this.moving_window = true;
+            }
+        }),
+    )
+    .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.moving_window = false))
+    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
+        if std::mem::take(&mut this.moving_window) && event.dragging() {
+            window.start_window_move();
+        }
+    }))
+}
+
 /// A header's title, whose line height the header's height accounts for.
 fn header_title() -> Div {
     div().text_lg().line_height(relative(HEADER_LINE_HEIGHT))
@@ -708,7 +786,7 @@ fn render_day_separator(label: String, cx: &App) -> Div {
                 .rounded_full()
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.background)
+                .bg(theme.popover)
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.muted_foreground)
@@ -717,16 +795,19 @@ fn render_day_separator(label: String, cx: &App) -> Div {
         .child(line())
 }
 
-/// A colored circle with the initials of `name`; the color is stable per id.
-fn avatar(name: &str, id: i64, size: Pixels) -> Div {
+/// A pastel circle with the initials of `name`; the color is stable per id.
+fn avatar(name: &str, id: i64, size: Pixels, palette: &Palette) -> Div {
     // Small avatars only have room for one letter.
     let letters = if size >= px(28.) { 2 } else { 1 };
+    let color = theme::color(&palette.avatar_colors[avatar_color_index(id, palette.avatar_colors.len())]);
+    // A faint sheen toward the top left gives the flat color some depth.
+    let sheen = Hsla { l: (color.l + 0.06).min(0.96), ..color };
     div()
         .size(size)
         .flex_none()
         .rounded_full()
-        .bg(rgb(AVATAR_COLORS[avatar_color_index(id)]))
-        .text_color(white())
+        .bg(linear_gradient(135., linear_color_stop(sheen, 0.), linear_color_stop(color, 1.)))
+        .text_color(theme::color(&palette.avatar_text))
         .text_size(size * 0.4)
         .font_weight(FontWeight::SEMIBOLD)
         .flex()
@@ -741,12 +822,10 @@ fn sender_id(sender: SenderId) -> i64 {
     }
 }
 
-/// Avatar backgrounds, calm enough for white initials on light and dark themes.
-const AVATAR_COLORS: [u32; 7] = [0xd95c66, 0xd9824a, 0x8b6fd6, 0x4fa36a, 0x3ea0ad, 0x4f8bd6, 0xd0628f];
-
-/// Which of [`AVATAR_COLORS`] an id gets. Group ids are negative, and get one too.
-fn avatar_color_index(id: i64) -> usize {
-    id.rem_euclid(AVATAR_COLORS.len() as i64) as usize
+/// Which of `count` avatar colors an id gets. Group ids are negative, and
+/// get one too. The config checks that there's at least one color.
+fn avatar_color_index(id: i64, count: usize) -> usize {
+    id.rem_euclid(count.max(1) as i64) as usize
 }
 
 /// The first letters of the first `max` words of `name`, in upper case.
@@ -880,8 +959,8 @@ mod tests {
     use gpui_kit::{ListAlignment, ListOffset, ListState, px};
 
     use super::{
-        AVATAR_COLORS, BADGE_HEIGHT, CHAT_LINE_HEIGHT, HEADER_LINE_HEIGHT, Metrics, RowFacts, RowLook, TEXT_LG,
-        avatar_color_index, day_label, format_time, initials, pin_to_top, recent_repliers, row_looks, unread_label,
+        BADGE_HEIGHT, CHAT_LINE_HEIGHT, HEADER_LINE_HEIGHT, Metrics, RowFacts, RowLook, TEXT_LG, avatar_color_index,
+        day_label, format_time, initials, pin_to_top, recent_repliers, row_looks, unread_label,
     };
 
     #[test]
@@ -1020,13 +1099,14 @@ mod tests {
     #[test]
     fn avatar_colors_are_stable_and_cover_negative_ids() {
         for id in [0, 1, 6, 7, -1, -7, -1001234567890, i64::MIN, i64::MAX] {
-            let index = avatar_color_index(id);
-            assert!(index < AVATAR_COLORS.len(), "{id}");
-            assert_eq!(index, avatar_color_index(id));
+            let index = avatar_color_index(id, 7);
+            assert!(index < 7, "{id}");
+            assert_eq!(index, avatar_color_index(id, 7));
         }
-        assert_eq!(avatar_color_index(7), avatar_color_index(0));
-        assert_ne!(avatar_color_index(1), avatar_color_index(2));
-        assert_eq!(avatar_color_index(-1), AVATAR_COLORS.len() - 1);
+        assert_eq!(avatar_color_index(7, 7), avatar_color_index(0, 7));
+        assert_ne!(avatar_color_index(1, 7), avatar_color_index(2, 7));
+        assert_eq!(avatar_color_index(-1, 7), 6);
+        assert_eq!(avatar_color_index(5, 1), 0);
     }
 
     #[test]

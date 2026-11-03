@@ -11,7 +11,7 @@ use gpui_kit::{
     *,
 };
 
-use crate::app::FrillogramApp;
+use crate::{app::FrillogramApp, chat::drags_window};
 
 /// The `[telegram]` section the setup screen suggests; SETUP.md has the other ways.
 const TELEGRAM_SECTION: &str = "[telegram]\napi_id = 12345\napi_hash_command = \"pass frillogram/api_hash\"";
@@ -79,8 +79,8 @@ impl FrillogramApp {
             card(cx).child(mark(Lucide::MessagesSquare, cx.theme().primary, cx.theme().primary_foreground)).child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .when(!hint.is_empty(), |text| text.child(div().text_sm().text_color(muted).child(hint))),
+                    .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .when(!hint.is_empty(), |text| text.child(div().text_color(muted).child(hint))),
             );
         if let Some(input) = input {
             card = card.child(Input::new(input)).child(
@@ -118,30 +118,39 @@ impl FrillogramApp {
 fn card(cx: &mut Context<FrillogramApp>) -> Div {
     let theme = cx.theme();
     v_flex()
-        .w(px(400.))
-        .gap_4()
-        .p_8()
-        .rounded(theme.radius_lg)
+        .w(px(420.))
+        .gap_5()
+        .p_10()
+        .rounded(theme.radius_lg * 2.)
         .border_1()
         .border_color(theme.border)
         .bg(theme.popover)
         .text_color(theme.popover_foreground)
-        .shadow_lg()
+        .shadow_md()
 }
 
 /// A rounded square with `icon` at the top of a card.
 fn mark(icon: impl Into<Icon>, background: Hsla, foreground: Hsla) -> Div {
     div()
-        .size_10()
-        .rounded_lg()
+        .size_12()
+        .rounded_xl()
         .bg(background)
         .flex()
         .items_center()
         .justify_center()
-        .child(Icon::new(icon).with_size(px(20.)).text_color(foreground))
+        .child(Icon::new(icon).with_size(px(24.)).text_color(foreground))
 }
 
-/// `content` in the middle of the window, on the sidebar's color so the card stands out.
+/// `content` in the middle of the window, on the sidebar's color so the card
+/// stands out. A strip along the top moves the window, as a title bar would.
 fn centered(content: Div, cx: &mut Context<FrillogramApp>) -> Div {
-    div().size_full().flex().items_center().justify_center().bg(cx.theme().sidebar).child(content)
+    div()
+        .relative()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(cx.theme().sidebar)
+        .child(content)
+        .child(div().id("drag-strip").absolute().top_0().left_0().right_0().h_10().map(|area| drags_window(area, cx)))
 }

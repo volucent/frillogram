@@ -44,7 +44,15 @@ fn main() {
         let window_size = size(px(layout.window_width as f32), px(layout.window_height as f32));
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(window_size, cx)),
-            titlebar: Some(TitlebarOptions { title: Some("Frillogram".into()), ..Default::default() }),
+            // On macOS the content runs under a see-through title bar, so no
+            // bright system strip sits above the soft palette; the headers
+            // move the window instead.
+            titlebar: Some(TitlebarOptions {
+                title: Some("Frillogram".into()),
+                appears_transparent: cfg!(target_os = "macos"),
+                traffic_light_position: cfg!(target_os = "macos").then(|| point(px(18.), px(22.))),
+            }),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             ..Default::default()
         };
         let frillogram_core::Loaded { settings, config, .. } = loaded;
@@ -55,7 +63,7 @@ fn main() {
 }
 
 // Only the selected SVGs are embedded, not the whole Lucide catalog.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Lock, MessageSquareText, MessagesSquare, Paperclip]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [ArrowUp, Lock, MessageSquareText, MessagesSquare, Paperclip, Search]);
 
 /// The icons gpui-component draws in its own controls, plus the ones above.
 struct Icons;

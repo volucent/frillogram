@@ -21,7 +21,7 @@
 [appearance]
 # "system" follows the OS's light or dark appearance, also when it changes; or "light" or "dark".
 # theme = "system"
-# Color of buttons, links and unread badges, as "#rrggbb", e.g. "#2563eb"; "" keeps the theme's.
+# One accent for both themes, as "#rrggbb", e.g. "#2563eb"; "" keeps each palette's own accent below.
 # accent = ""
 # Font family for all text, as installed on this machine, e.g. "Inter"; "" keeps the system UI font.
 # font_family = ""
@@ -31,6 +31,52 @@
 # density = "comfortable"
 # Side of the avatars in the chat list, the headers and next to messages, in px, 20 to 64.
 # avatar_size = 36
+
+[colors.light]
+# The light theme's colors, as "#rrggbb". The defaults are soft pastels with no pure white or black.
+# Behind messages.
+# background = "#f3eee6"
+# Behind the chat list, and the login screen.
+# sidebar = "#e9e3f0"
+# The message box, cards and menus.
+# surface = "#f8f4ee"
+# Text.
+# foreground = "#3d3a4b"
+# Times, previews and hints.
+# muted = "#77718a"
+# Lines between areas.
+# border = "#dcd4cb"
+# The selected chat, buttons, unread badges and the focus ring.
+# accent = "#c5b6f2"
+# Errors and unsent messages.
+# danger = "#b0505b"
+# Avatar backgrounds; each chat and person gets one, the same every time.
+# avatar_colors = ["#f5c6aa", "#f1b9c7", "#cdbff3", "#b6dfc6", "#b4d3f1", "#f2dea4", "#a9dbd7"]
+# Initials on avatars.
+# avatar_text = "#3d3a4b"
+
+[colors.dark]
+# The dark theme's colors: a dim slate instead of black, and soft text instead of white.
+# Behind messages.
+# background = "#2c2b36"
+# Behind the chat list, and the login screen.
+# sidebar = "#26252f"
+# The message box, cards and menus.
+# surface = "#35343f"
+# Text.
+# foreground = "#d8d2e3"
+# Times, previews and hints.
+# muted = "#9d97ae"
+# Lines between areas.
+# border = "#403e4d"
+# The selected chat, buttons, unread badges and the focus ring.
+# accent = "#b3a4e8"
+# Errors and unsent messages.
+# danger = "#e3949c"
+# Avatar backgrounds; each chat and person gets one, the same every time.
+# avatar_colors = ["#dfb197", "#dba5b3", "#b8abe0", "#a2cbb2", "#a0bfdd", "#dcc993", "#96c6c2"]
+# Initials on avatars.
+# avatar_text = "#2c2b36"
 
 [layout]
 # Width of the window when it opens, in px, 480 to 7680.

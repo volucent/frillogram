@@ -154,8 +154,12 @@ are:
 
 - `[telegram]`: `api_id`, `api_hash_command` and `data_dir`, described above and below.
 - `[appearance]`: `theme` (`"system"`, which follows the OS's light or dark appearance, `"light"` or
-  `"dark"`), `accent` (a `"#rrggbb"` color), `font_family`, `font_size`, `density` (`"comfortable"` or
-  `"compact"`) and `avatar_size`.
+  `"dark"`), `accent` (a `"#rrggbb"` color for both themes, or `""` for each palette's own),
+  `font_family`, `font_size`, `density` (`"comfortable"` or `"compact"`) and `avatar_size`.
+- `[colors.light]` and `[colors.dark]`: each theme's palette as `"#rrggbb"` colors: `background`,
+  `sidebar`, `surface`, `foreground`, `muted`, `border`, `accent`, `danger`, `avatar_colors` and
+  `avatar_text`. The defaults are soft pastels with no pure white or black, which are easier on the
+  eyes; a key left out keeps its own theme's default.
 - `[layout]`: the window's size when it opens, and the widths of the chat list and the thread panel.
 - `[time]`: the [strftime formats](https://docs.rs/chrono/latest/chrono/format/strftime/) of message
   times, today and older, and of the day separators between messages, this year and in other years.
