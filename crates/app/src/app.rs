@@ -255,10 +255,14 @@ impl FrillogramApp {
                     _ => None,
                 };
                 let selected = chat_id.is_some() && chat_id == self.selected_chat;
-                if let Event::MessageSendFailed { error, .. } = &event
-                    && selected
-                {
-                    self.show_error(error.clone(), chat_id);
+                // `send_text` returns once TDLib queued the message, so most
+                // failures arrive here, often after the user moved on.
+                if let Event::MessageSendFailed { error, message, .. } = &event {
+                    if selected {
+                        self.show_error(error.clone(), chat_id);
+                    } else {
+                        push_distinct(self.pending_errors.entry(message.chat_id).or_default(), error.clone());
+                    }
                 }
                 if self.apply_message_change(&event) {
                     self.rethread(window, cx);
@@ -504,8 +508,7 @@ impl FrillogramApp {
             if let Err(error) = tg.send_text(chat_id, text.clone(), reply_to).await {
                 let _ = this.update_in(cx, |app, window, cx| {
                     let selected = app.selected_chat == Some(chat_id);
-                    // The root was already sent, so its id hasn't changed since.
-                    let thread_open = reply_to.is_some() && app.open_thread == reply_to;
+                    let thread_open = reply_thread_open(reply_to, app.open_thread, &app.threads, &app.messages);
                     match restore_target(selected, in_thread, thread_open) {
                         Restore::Composer => restore_failed_text(&input, text, window, cx),
                         Restore::Drop => {}
@@ -571,16 +574,17 @@ impl FrillogramApp {
         // Server ids grow over time, so this shows messages oldest first.
         self.messages.sort_by_key(|m| m.id);
         let threads = threads::group(&self.messages);
-        // Close the thread panel if its root is gone, so replies can't go to
-        // a deleted message.
-        if let Some(root_id) = self.open_thread
-            && !self.messages.iter().any(|m| m.id == root_id)
-        {
-            self.open_thread = None;
-            if self.thread_composer.read(cx).focus_handle(cx).is_focused(window) {
-                self.composer.update(cx, |input, cx| input.focus(window, cx));
+        // The thread panel follows its root into the thread it joined, e.g.
+        // when history brings in the message it replies to, and closes if
+        // the root is gone, so replies can't go to a deleted message.
+        if let Some(root_id) = self.open_thread {
+            self.open_thread = thread_root_of(root_id, &threads, &self.messages);
+            if self.open_thread.is_none() {
+                if self.thread_composer.read(cx).focus_handle(cx).is_focused(window) {
+                    self.composer.update(cx, |input, cx| input.focus(window, cx));
+                }
+                self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
             }
-            self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
         }
         // Keep the thread panel at its newest reply, unless the user scrolled up.
         let (offset, max) = (self.thread_scroll.offset(), self.thread_scroll.max_offset());
@@ -657,6 +661,13 @@ fn restore_target(chat_selected: bool, in_thread: bool, thread_open: bool) -> Re
     } else {
         Restore::Draft
     }
+}
+
+/// Whether the thread holding the reply target `reply_to` is still the open one.
+/// The panel may have followed its root into an older thread since the send,
+/// so this compares thread roots. A target that's no longer loaded is in none.
+fn reply_thread_open(reply_to: Option<i64>, open_thread: Option<i64>, threads: &[Thread], messages: &[Msg]) -> bool {
+    reply_to.and_then(|id| thread_root_of(id, threads, messages)).is_some_and(|root| open_thread == Some(root))
 }
 
 /// Adds `text` to `chat_id`'s draft, after whatever was typed there since.
@@ -749,6 +760,14 @@ fn row_keys(threads: &[Thread], messages: &[Msg]) -> Vec<RowKey> {
         .collect()
 }
 
+/// The root id of the thread holding message `id`, if that's loaded.
+fn thread_root_of(id: i64, threads: &[Thread], messages: &[Msg]) -> Option<i64> {
+    threads
+        .iter()
+        .find(|t| std::iter::once(t.root).chain(t.replies.iter().copied()).any(|i| messages[i].id == id))
+        .map(|t| messages[t.root].id)
+}
+
 /// The range of `old` rows that differ from `new`, and how many `new` rows
 /// replace them: everything between their common prefix and common suffix.
 fn changed_rows<T: PartialEq>(old: &[T], new: &[T]) -> (Range<usize>, usize) {
@@ -790,7 +809,8 @@ mod tests {
     use frillogram_core::{ChatSummary, Msg, SendState, SenderId, threads};
 
     use super::{
-        ErrorBanner, Restore, appendix, changed_rows, park_draft, restore_target, row_keys, settle_open, visible_chats,
+        ErrorBanner, Restore, appendix, changed_rows, park_draft, reply_thread_open, restore_target, row_keys,
+        settle_open, thread_root_of, visible_chats,
     };
 
     #[test]
@@ -835,6 +855,53 @@ mod tests {
         // Deleting message 1 removes only its row, although every index moved.
         assert_eq!(changed_rows(&old, &new), (0..1, 0));
         assert_eq!(new, vec![(2, vec![3], false), (4, vec![], false)]);
+    }
+
+    #[test]
+    fn open_thread_follows_its_root_into_the_thread_it_joined() {
+        let msg = |id: i64, reply_to: Option<i64>| Msg {
+            id,
+            chat_id: 1,
+            sender: SenderId::User(1),
+            date: 0,
+            text: String::new(),
+            reply_to,
+            outgoing: false,
+            send_state: SendState::Sent,
+        };
+        // 5 replies to 2, which isn't loaded yet, so it roots its own thread.
+        let before = [msg(5, Some(2)), msg(6, Some(5))];
+        assert_eq!(thread_root_of(5, &threads::group(&before), &before), Some(5));
+        // History brings in 2, and 5 becomes a reply in 2's thread.
+        let after = [msg(1, None), msg(2, None), msg(5, Some(2)), msg(6, Some(5))];
+        let threads = threads::group(&after);
+        assert_eq!(thread_root_of(5, &threads, &after), Some(2));
+        assert_eq!(thread_root_of(1, &threads, &after), Some(1));
+        // A deleted root closes the panel.
+        assert_eq!(thread_root_of(3, &threads, &after), None);
+    }
+
+    #[test]
+    fn failed_reply_finds_its_thread_after_the_root_moved() {
+        let msg = |id: i64, reply_to: Option<i64>| Msg {
+            id,
+            chat_id: 1,
+            sender: SenderId::User(1),
+            date: 0,
+            text: String::new(),
+            reply_to,
+            outgoing: false,
+            send_state: SendState::Sent,
+        };
+        // The reply went to 5, then history brought in 2 and moved the thread to root 2.
+        let messages = [msg(1, None), msg(2, None), msg(5, Some(2)), msg(6, Some(5))];
+        let threads = threads::group(&messages);
+        assert!(reply_thread_open(Some(5), Some(2), &threads, &messages));
+        // Another thread is open, or none, or the reply target is gone.
+        assert!(!reply_thread_open(Some(5), Some(1), &threads, &messages));
+        assert!(!reply_thread_open(Some(5), None, &threads, &messages));
+        assert!(!reply_thread_open(Some(3), Some(2), &threads, &messages));
+        assert!(!reply_thread_open(None, Some(2), &threads, &messages));
     }
 
     #[test]

@@ -9,7 +9,9 @@ use crate::app::FrillogramApp;
 fn main() {
     let config = frillogram_core::Config::from_env();
 
-    gpui_kit::application().run(move |cx| {
+    // There's no menu, Cmd+Q or Dock reopen, so on macOS a process left
+    // without its window would keep TDLib running with no way back to it.
+    gpui_kit::application().with_quit_mode(QuitMode::LastWindowClosed).run(move |cx| {
         gpui_kit::init(cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),

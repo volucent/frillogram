@@ -100,7 +100,8 @@ pub enum Event {
         message: Msg,
         error: String,
     },
-    /// Messages were deleted for good (not just dropped from TDLib's cache).
+    /// Messages left the chat for good: deleted (not just dropped from TDLib's
+    /// cache), or sent from here and scheduled instead.
     MessagesDeleted {
         chat_id: i64,
         message_ids: Vec<i64>,
@@ -137,7 +138,16 @@ impl Event {
                 _ => return None,
             },
             U::ChatReadInbox(u) => Event::ChatUnread { chat_id: u.chat_id, unread: u.unread_count },
-            U::NewMessage(u) => Event::NewMessage(Msg::from(u.message)),
+            // Scheduled messages (date 0) aren't part of the chat history.
+            U::NewMessage(u) if u.message.scheduling_state.is_none() => Event::NewMessage(Msg::from(u.message)),
+            // A sent message can come back scheduled, e.g. a video waiting to
+            // be processed, so its pending copy leaves the history.
+            U::MessageSendSucceeded(u) if u.message.scheduling_state.is_some() => {
+                Event::MessagesDeleted { chat_id: u.message.chat_id, message_ids: vec![u.old_message_id] }
+            }
+            U::MessageSendFailed(u) if u.message.scheduling_state.is_some() => {
+                Event::MessagesDeleted { chat_id: u.message.chat_id, message_ids: vec![u.old_message_id] }
+            }
             U::MessageSendSucceeded(u) => {
                 Event::MessageSent { old_id: u.old_message_id, message: Msg::from(u.message) }
             }
@@ -277,5 +287,93 @@ fn content_text(content: &enums::MessageContent) -> String {
         C::MessageLocation(_) | C::MessageVenue(_) => "[Location]".into(),
         C::MessageContact(_) => "[Contact]".into(),
         _ => "[Unsupported message]".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHAT: i64 = 7;
+
+    fn message(id: i64, scheduling_state: Option<enums::MessageSchedulingState>) -> types::Message {
+        types::Message {
+            id,
+            sender_id: enums::MessageSender::User(types::MessageSenderUser { user_id: 1 }),
+            chat_id: CHAT,
+            sending_state: None,
+            scheduling_state,
+            is_outgoing: true,
+            is_pinned: false,
+            is_from_offline: false,
+            can_be_saved: true,
+            has_timestamped_media: false,
+            is_channel_post: false,
+            is_paid_star_suggested_post: false,
+            is_paid_ton_suggested_post: false,
+            contains_unread_mention: false,
+            date: 0,
+            edit_date: 0,
+            forward_info: None,
+            import_info: None,
+            interaction_info: None,
+            unread_reactions: Vec::new(),
+            fact_check: None,
+            suggested_post_info: None,
+            reply_to: None,
+            topic_id: None,
+            self_destruct_type: None,
+            self_destruct_in: 0.,
+            auto_delete_in: 0.,
+            via_bot_user_id: 0,
+            sender_business_bot_user_id: 0,
+            sender_boost_count: 0,
+            paid_message_star_count: 0,
+            author_signature: String::new(),
+            media_album_id: 0,
+            effect_id: 0,
+            restriction_info: None,
+            summary_language_code: String::new(),
+            content: enums::MessageContent::MessageUnsupported,
+            reply_markup: None,
+        }
+    }
+
+    fn scheduled() -> Option<enums::MessageSchedulingState> {
+        Some(enums::MessageSchedulingState::SendWhenOnline)
+    }
+
+    fn sent(message: types::Message) -> Option<Event> {
+        Event::from_update(enums::Update::MessageSendSucceeded(types::UpdateMessageSendSucceeded {
+            message,
+            old_message_id: 1,
+        }))
+    }
+
+    fn failed(message: types::Message) -> Option<Event> {
+        Event::from_update(enums::Update::MessageSendFailed(types::UpdateMessageSendFailed {
+            message,
+            old_message_id: 1,
+            error: types::Error { code: 400, message: "Nope".into() },
+        }))
+    }
+
+    fn deleted_pending_copy(event: Option<Event>) -> bool {
+        matches!(event, Some(Event::MessagesDeleted { chat_id: CHAT, message_ids }) if message_ids == [1])
+    }
+
+    #[test]
+    fn scheduled_new_messages_are_dropped() {
+        let new = |message| Event::from_update(enums::Update::NewMessage(types::UpdateNewMessage { message }));
+        assert!(new(message(2, scheduled())).is_none());
+        assert!(matches!(new(message(2, None)), Some(Event::NewMessage(Msg { id: 2, .. }))));
+    }
+
+    #[test]
+    fn sends_that_end_up_scheduled_delete_the_pending_copy() {
+        assert!(deleted_pending_copy(sent(message(2, scheduled()))));
+        assert!(deleted_pending_copy(failed(message(2, scheduled()))));
+        assert!(matches!(sent(message(2, None)), Some(Event::MessageSent { old_id: 1, message: Msg { id: 2, .. } })));
+        assert!(matches!(failed(message(2, None)), Some(Event::MessageSendFailed { old_id: 1, .. })));
     }
 }
