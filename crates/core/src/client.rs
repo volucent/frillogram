@@ -60,17 +60,21 @@ impl Telegram {
             .spawn(move || {
                 // `receive` blocks for up to 2s and also resolves pending
                 // requests, so it must never wait on a request itself.
+                // It keeps running after the event receiver is dropped, so
+                // requests still in flight resolve; updates are then discarded.
+                let mut forwarding = true;
                 loop {
                     let Some((update, _)) = tdlib_rs::receive() else { continue };
+                    if !forwarding {
+                        continue;
+                    }
                     if let enums::Update::AuthorizationState(u) = &update
                         && matches!(u.authorization_state, enums::AuthorizationState::WaitTdlibParameters)
                     {
                         send_parameters(id, config.clone(), tx.clone());
                     }
                     let Some(event) = Event::from_update(update) else { continue };
-                    if tx.send_blocking(event).is_err() {
-                        break;
-                    }
+                    forwarding = tx.send_blocking(event).is_ok();
                 }
             })
             .expect("failed to spawn the TDLib receive thread");

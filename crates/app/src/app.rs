@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 
 use frillogram_core::{
     AuthStep, ChatSummary, Config, Event, Msg, SenderId, Telegram,
@@ -32,14 +32,24 @@ pub struct FrillogramApp {
     pub(crate) password_input: Entity<InputState>,
 
     pub(crate) chats: HashMap<i64, ChatSummary>,
+    /// Ids of the chats shown in the chat list, in display order. Kept here
+    /// so the list isn't filtered and sorted on every frame.
+    pub(crate) visible_chats: Vec<i64>,
     pub(crate) user_names: HashMap<i64, String>,
     pub(crate) selected_chat: Option<i64>,
+    /// Bumped by each `select_chat`, so a slower, older load can tell it's
+    /// been superseded and leave the newer one's state alone.
+    load_generation: u64,
+    /// The selected chat's history failed to load, so picking it again retries.
+    load_failed: bool,
     /// Messages of the selected chat, oldest first.
     pub(crate) messages: Vec<Msg>,
     /// Message changes seen while the selected chat's history loads, replayed
     /// onto it once it arrives. `None` when no history is loading.
     changes_while_loading: Option<Vec<Event>>,
     pub(crate) threads: Vec<Thread>,
+    /// One key per entry of `threads`, for diffing them by content.
+    thread_keys: Vec<RowKey>,
     /// Root message id of the thread shown in the side panel.
     pub(crate) open_thread: Option<i64>,
     pub(crate) message_list: ListState,
@@ -61,6 +71,8 @@ impl FrillogramApp {
             cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .placeholder(placeholder)
+                    // Enter-to-send relies on this, which gpui-base 0.9 marks
+                    // `#[doc(hidden)]`; recheck it when upgrading.
                     .submit_on_enter(true)
                     .auto_grow(1, COMPOSER_MAX_ROWS)
             })
@@ -123,11 +135,15 @@ impl FrillogramApp {
             code_input,
             password_input,
             chats: HashMap::new(),
+            visible_chats: Vec::new(),
             user_names: HashMap::new(),
             selected_chat: None,
+            load_generation: 0,
+            load_failed: false,
             messages: Vec::new(),
             changes_while_loading: None,
             threads: Vec::new(),
+            thread_keys: Vec::new(),
             open_thread: None,
             message_list: ListState::new(0, ListAlignment::Bottom, px(600.)),
             thread_scroll: ScrollHandle::new(),
@@ -165,6 +181,7 @@ impl FrillogramApp {
             }
             Event::Chat(chat) => {
                 self.chats.insert(chat.id, chat);
+                self.visible_chats = visible_chats(&self.chats);
             }
             Event::ChatTitle { chat_id, title } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
@@ -175,11 +192,13 @@ impl FrillogramApp {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.last_message = preview;
                     chat.order = order;
+                    self.visible_chats = visible_chats(&self.chats);
                 }
             }
             Event::ChatOrder { chat_id, order } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.order = order;
+                    self.visible_chats = visible_chats(&self.chats);
                 }
             }
             Event::ChatUnread { chat_id, unread } => {
@@ -202,13 +221,25 @@ impl FrillogramApp {
             | Event::MessageSendFailed { .. }
             | Event::MessagesDeleted { .. }
             | Event::MessageText { .. } => {
-                if let Event::MessageSendFailed { error, .. } = &event {
+                let chat_id = match &event {
+                    Event::MessageSent { message, .. } | Event::MessageSendFailed { message, .. } => {
+                        Some(message.chat_id)
+                    }
+                    Event::MessagesDeleted { chat_id, .. } | Event::MessageText { chat_id, .. } => Some(*chat_id),
+                    _ => None,
+                };
+                let selected = chat_id.is_some() && chat_id == self.selected_chat;
+                if let Event::MessageSendFailed { error, .. } = &event
+                    && selected
+                {
                     self.error = Some(error.clone());
                 }
                 if self.apply_message_change(&event) {
                     self.rethread(window, cx);
                 }
-                if let Some(changes) = &mut self.changes_while_loading {
+                if let Some(changes) = &mut self.changes_while_loading
+                    && selected
+                {
                     changes.push(event);
                 }
             }
@@ -264,15 +295,20 @@ impl FrillogramApp {
 
     pub(crate) fn select_chat(&mut self, chat_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tg) = self.tg else { return };
-        if self.selected_chat == Some(chat_id) {
+        if self.selected_chat == Some(chat_id) && !self.load_failed {
             return;
         }
         let previous = self.selected_chat.replace(chat_id);
+        self.load_generation += 1;
+        let generation = self.load_generation;
+        self.load_failed = false;
         self.messages.clear();
         self.changes_while_loading = Some(Vec::new());
         self.threads.clear();
+        self.thread_keys.clear();
         self.message_list.reset(0);
         self.open_thread = None;
+        self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
         self.error = None;
         self.composer.update(cx, |input, cx| input.focus(window, cx));
 
@@ -280,21 +316,26 @@ impl FrillogramApp {
             if let Some(previous) = previous {
                 let _ = tg.close_chat(previous).await;
             }
-            // Another click may have picked a different chat while this one
-            // was closing the previous; opening it now would leave it open.
-            let still_selected =
-                |cx: &mut AsyncApp| this.read_with(cx, |app, _| app.selected_chat == Some(chat_id)).unwrap_or(false);
-            if !still_selected(cx) {
+            // Another click may have started a newer load meanwhile; that one
+            // owns the chat state now, even if it's for this same chat.
+            let is_current =
+                |cx: &mut AsyncApp| this.read_with(cx, |app, _| app.load_generation == generation).unwrap_or(false);
+            if !is_current(cx) {
                 return;
             }
             let _ = tg.open_chat(chat_id).await;
-            if !still_selected(cx) {
-                let _ = tg.close_chat(chat_id).await;
+            if !is_current(cx) {
+                // Opening it now would leave it open, unless the newer load
+                // picked this chat again and needs it open.
+                let reselected = this.read_with(cx, |app, _| app.selected_chat == Some(chat_id)).unwrap_or(false);
+                if !reselected {
+                    let _ = tg.close_chat(chat_id).await;
+                }
                 return;
             }
             let history = tg.history(chat_id, HISTORY_LIMIT).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                if app.selected_chat != Some(chat_id) {
+                if app.load_generation != generation {
                     return;
                 }
                 match history {
@@ -315,6 +356,7 @@ impl FrillogramApp {
                     }
                     Err(error) => {
                         app.changes_while_loading = None;
+                        app.load_failed = true;
                         app.error = Some(error);
                     }
                 }
@@ -343,6 +385,10 @@ impl FrillogramApp {
     }
 
     pub(crate) fn open_thread(&mut self, root_id: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
+        // A draft for one thread mustn't be sent to another by Enter.
+        if self.open_thread != root_id {
+            self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
+        }
         self.open_thread = root_id;
         if root_id.is_some() {
             self.thread_scroll.scroll_to_bottom();
@@ -389,7 +435,18 @@ impl FrillogramApp {
             Event::MessageSent { old_id, message } | Event::MessageSendFailed { old_id, message, .. }
                 if selected(message.chat_id) =>
             {
-                let Some(index) = self.messages.iter().position(|m| m.id == *old_id) else { return false };
+                // The thread panel and replies may still point at the
+                // temporary id of a message that was pending.
+                let mut changed = false;
+                if self.open_thread == Some(*old_id) {
+                    self.open_thread = Some(message.id);
+                    changed = true;
+                }
+                for reply in self.messages.iter_mut().filter(|m| m.reply_to == Some(*old_id)) {
+                    reply.reply_to = Some(message.id);
+                    changed = true;
+                }
+                let Some(index) = self.messages.iter().position(|m| m.id == *old_id) else { return changed };
                 if self.messages.iter().any(|m| m.id == message.id) {
                     self.messages.remove(index);
                 } else {
@@ -429,6 +486,7 @@ impl FrillogramApp {
             if self.thread_composer.read(cx).focus_handle(cx).is_focused(window) {
                 self.composer.update(cx, |input, cx| input.focus(window, cx));
             }
+            self.thread_composer.update(cx, |input, cx| input.set_value("", window, cx));
         }
         // Keep the thread panel at its newest reply, unless the user scrolled up.
         let (offset, max) = (self.thread_scroll.offset(), self.thread_scroll.max_offset());
@@ -437,11 +495,11 @@ impl FrillogramApp {
         }
         // Only replace the rows that changed, so the list keeps its scroll
         // position when a message arrives. `reset` is for switching chats.
-        let old = &self.threads;
-        let prefix = old.iter().zip(&threads).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..].iter().rev().zip(threads[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
-        self.message_list.splice(prefix..old.len() - suffix, threads.len() - prefix - suffix);
+        let keys = row_keys(&threads, &self.messages);
+        let (old_rows, new_count) = changed_rows(&self.thread_keys, &keys);
+        self.message_list.splice(old_rows, new_count);
         self.threads = threads;
+        self.thread_keys = keys;
     }
 
     pub(crate) fn sender_name(&self, sender: SenderId) -> String {
@@ -451,6 +509,35 @@ impl FrillogramApp {
         }
         .unwrap_or_else(|| "Unknown".into())
     }
+}
+
+/// Identifies a message list row by content: its root id, reply ids and
+/// whether the root is a reply. `Thread` holds indices into `messages`, which
+/// shift whenever a message above is added or removed.
+type RowKey = (i64, Vec<i64>, bool);
+
+fn row_keys(threads: &[Thread], messages: &[Msg]) -> Vec<RowKey> {
+    threads
+        .iter()
+        .map(|t| (messages[t.root].id, t.replies.iter().map(|&i| messages[i].id).collect(), t.root_is_reply))
+        .collect()
+}
+
+/// The range of `old` rows that differ from `new`, and how many `new` rows
+/// replace them: everything between their common prefix and common suffix.
+fn changed_rows<T: PartialEq>(old: &[T], new: &[T]) -> (Range<usize>, usize) {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
+    (prefix..old.len() - suffix, new.len() - prefix - suffix)
+}
+
+/// Ids of the chats to list, in Telegram's order.
+fn visible_chats(chats: &HashMap<i64, ChatSummary>) -> Vec<i64> {
+    // Channels stay hidden until sponsored messages are shown, which
+    // Telegram's API terms require for any client that displays channels.
+    let mut visible: Vec<&ChatSummary> = chats.values().filter(|c| c.order > 0 && !c.is_channel).collect();
+    visible.sort_by_key(|c| std::cmp::Reverse((c.order, c.id)));
+    visible.into_iter().map(|c| c.id).collect()
 }
 
 impl Render for FrillogramApp {
@@ -463,5 +550,68 @@ impl Render for FrillogramApp {
             self.render_login(cx).into_any_element()
         };
         div().size_full().bg(cx.theme().background).text_color(cx.theme().foreground).child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's glob import brings its own `test` attribute.
+    use std::collections::HashMap;
+
+    use frillogram_core::{ChatSummary, Msg, SendState, SenderId, threads};
+
+    use super::{changed_rows, row_keys, visible_chats};
+
+    #[test]
+    fn identical_rows_change_nothing() {
+        assert_eq!(changed_rows(&[1, 2, 3], &[1, 2, 3]), (3..3, 0));
+    }
+
+    #[test]
+    fn appended_row_is_inserted_at_the_end() {
+        assert_eq!(changed_rows(&[1, 2], &[1, 2, 3]), (2..2, 1));
+    }
+
+    #[test]
+    fn deleted_row_above_keeps_the_rest() {
+        assert_eq!(changed_rows(&[1, 2, 3, 4], &[1, 3, 4]), (1..2, 0));
+        assert_eq!(changed_rows(&[1, 2, 3], &[2, 3]), (0..1, 0));
+    }
+
+    #[test]
+    fn repeated_rows_never_underflow() {
+        assert_eq!(changed_rows(&[1, 1], &[1, 1, 1]), (2..2, 1));
+        assert_eq!(changed_rows(&[1, 1, 1], &[1]), (1..3, 0));
+        assert_eq!(changed_rows::<i32>(&[], &[]), (0..0, 0));
+    }
+
+    #[test]
+    fn row_keys_survive_index_shifts() {
+        let msg = |id: i64, reply_to: Option<i64>| Msg {
+            id,
+            chat_id: 1,
+            sender: SenderId::User(1),
+            date: 0,
+            text: String::new(),
+            reply_to,
+            outgoing: false,
+            send_state: SendState::Sent,
+        };
+        let before = [msg(1, None), msg(2, None), msg(3, Some(2)), msg(4, None)];
+        let after = &before[1..];
+        let old = row_keys(&threads::group(&before), &before);
+        let new = row_keys(&threads::group(after), after);
+        // Deleting message 1 removes only its row, although every index moved.
+        assert_eq!(changed_rows(&old, &new), (0..1, 0));
+        assert_eq!(new, vec![(2, vec![3], false), (4, vec![], false)]);
+    }
+
+    #[test]
+    fn visible_chats_skip_channels_and_unlisted_and_sort_by_order() {
+        let chat = |id: i64, order: i64, is_channel: bool| {
+            (id, ChatSummary { id, title: String::new(), last_message: None, unread: 0, order, is_channel })
+        };
+        let chats = HashMap::from([chat(1, 5, false), chat(2, 9, false), chat(3, 7, true), chat(4, 0, false)]);
+        assert_eq!(visible_chats(&chats), vec![2, 1]);
     }
 }

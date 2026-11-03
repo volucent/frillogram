@@ -38,14 +38,15 @@ FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogra
 ```
 
 Or put them in a `.env` file in the repository root (it's in `.gitignore`), readable only by you, and load
-it into your shell:
+it into your shell. Creating the file private before writing to it keeps the hash from ever being readable
+by others:
 
 ```sh
+install -m 600 /dev/null .env
 cat > .env <<'EOF'
 FRILLOGRAM_API_ID=12345
 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef
 EOF
-chmod 600 .env
 set -a; source .env; set +a
 cargo run
 ```

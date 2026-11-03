@@ -21,10 +21,12 @@ message cache on this machine (see [where data is kept](SETUP.md#where-data-is-k
 ## Run it
 
 You need Rust 1.92 or newer ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
-[my.telegram.org](https://my.telegram.org). [SETUP.md](SETUP.md) walks through getting them, then:
+[my.telegram.org](https://my.telegram.org). [SETUP.md](SETUP.md) walks through getting them and passing
+them in without leaving the `api_hash` in your shell history, from [`pass`](https://www.passwordstore.org)
+or a private `.env` file:
 
 ```sh
-FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef cargo run
+FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogram/api_hash) cargo run
 ```
 
 ## Layout

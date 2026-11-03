@@ -1,5 +1,7 @@
-use chrono::{DateTime, Local};
-use frillogram_core::{ChatSummary, Msg, SendState, SenderId};
+use std::ops::Range;
+
+use chrono::{DateTime, Local, NaiveDate};
+use frillogram_core::{Msg, SendState, SenderId};
 use gpui_kit::{
     component::{
         ActiveTheme,
@@ -19,53 +21,26 @@ const THREAD_PANEL_WIDTH: f32 = 400.;
 
 impl FrillogramApp {
     pub(crate) fn render_main(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut root = h_flex().size_full().child(self.render_chat_list(cx)).child(self.render_chat(cx));
+        // Read the clock once per frame, not once per message.
+        let today = Local::now().date_naive();
+        let mut root = h_flex().size_full().child(self.render_chat_list(cx)).child(self.render_chat(today, cx));
         if let Some(root_id) = self.open_thread {
-            root = root.child(self.render_thread_panel(root_id, cx));
+            root = root.child(self.render_thread_panel(root_id, today, cx));
         }
         root
     }
 
     fn render_chat_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Channels stay hidden until sponsored messages are shown, which
-        // Telegram's API terms require for any client that displays channels.
-        let mut chats: Vec<&ChatSummary> = self.chats.values().filter(|c| c.order > 0 && !c.is_channel).collect();
-        chats.sort_by_key(|c| std::cmp::Reverse((c.order, c.id)));
-
-        let theme = cx.theme();
-        let (active, hover, muted, primary, primary_fg) =
-            (theme.list_active, theme.list_hover, theme.muted_foreground, theme.primary, theme.primary_foreground);
-
-        let rows = chats.into_iter().map(|chat| {
-            let chat_id = chat.id;
-            let selected = self.selected_chat == Some(chat_id);
-            let mut title_row = h_flex()
-                .gap_2()
-                .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(chat.title.clone()));
-            if chat.unread > 0 {
-                title_row = title_row.child(
-                    div()
-                        .px_1p5()
-                        .rounded_full()
-                        .bg(primary)
-                        .text_color(primary_fg)
-                        .text_xs()
-                        .child(chat.unread.to_string()),
-                );
-            }
-            h_flex()
-                .id(ElementId::Name(format!("chat-{chat_id}").into()))
-                .gap_3()
-                .px_3()
-                .py_2()
-                .when(selected, |row| row.bg(active))
-                .hover(move |row| row.bg(hover))
-                .on_click(cx.listener(move |this, _, window, cx| this.select_chat(chat_id, window, cx)))
-                .child(avatar(&chat.title, chat_id))
-                .child(v_flex().flex_1().min_w_0().child(title_row).child(
-                    div().truncate().text_sm().text_color(muted).child(chat.last_message.clone().unwrap_or_default()),
-                ))
-        });
+        // Only the rows in view are laid out, since the list can hold
+        // thousands of chats.
+        let rows = uniform_list(
+            "chat-list",
+            self.visible_chats.len(),
+            cx.processor(|this, range: Range<usize>, _window, cx| {
+                range.map(|ix| this.render_chat_row(ix, cx)).collect::<Vec<_>>()
+            }),
+        )
+        .flex_1();
 
         v_flex()
             .w(px(SIDEBAR_WIDTH))
@@ -75,10 +50,52 @@ impl FrillogramApp {
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
             .child(div().px_3().py_2().text_lg().font_weight(FontWeight::BOLD).child("Chats"))
-            .child(div().id("chat-list").flex_1().overflow_y_scroll().children(rows))
+            .child(rows)
     }
 
-    fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_chat_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(chat) = self.visible_chats.get(ix).and_then(|id| self.chats.get(id)) else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme();
+        let (active, hover, muted, primary, primary_fg) =
+            (theme.list_active, theme.list_hover, theme.muted_foreground, theme.primary, theme.primary_foreground);
+
+        let chat_id = chat.id;
+        let selected = self.selected_chat == Some(chat_id);
+        let mut title_row = h_flex()
+            .gap_2()
+            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(chat.title.clone()));
+        if chat.unread > 0 {
+            title_row = title_row.child(
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .bg(primary)
+                    .text_color(primary_fg)
+                    .text_xs()
+                    .child(chat.unread.to_string()),
+            );
+        }
+        h_flex()
+            .id(ElementId::Name(format!("chat-{chat_id}").into()))
+            // A list item is laid out on its own, so it has to ask for the full width.
+            .w_full()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .when(selected, |row| row.bg(active))
+            // The hover color would hide the selection.
+            .when(!selected, |row| row.hover(move |row| row.bg(hover)))
+            .on_click(cx.listener(move |this, _, window, cx| this.select_chat(chat_id, window, cx)))
+            .child(avatar(&chat.title, chat_id))
+            .child(v_flex().flex_1().min_w_0().child(title_row).child(
+                div().truncate().text_sm().text_color(muted).child(chat.last_message.clone().unwrap_or_default()),
+            ))
+            .into_any_element()
+    }
+
+    fn render_chat(&self, today: NaiveDate, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
         let Some(chat) = self.selected_chat.and_then(|id| self.chats.get(&id)) else {
             return v_flex()
@@ -92,7 +109,7 @@ impl FrillogramApp {
 
         let list = list(
             self.message_list.clone(),
-            cx.processor(|this, ix: usize, _window, cx| this.render_thread_row(ix, cx).into_any_element()),
+            cx.processor(move |this, ix: usize, _window, cx| this.render_thread_row(ix, today, cx).into_any_element()),
         )
         .size_full();
 
@@ -135,7 +152,7 @@ impl FrillogramApp {
     }
 
     /// One row of the main list: a thread's root message and a summary of its replies.
-    fn render_thread_row(&self, ix: usize, cx: &mut Context<Self>) -> Div {
+    fn render_thread_row(&self, ix: usize, today: NaiveDate, cx: &mut Context<Self>) -> Div {
         let Some(thread) = self.threads.get(ix) else { return div() };
         let root = &self.messages[thread.root];
         let muted = cx.theme().muted_foreground;
@@ -146,7 +163,7 @@ impl FrillogramApp {
         if thread.root_is_reply {
             row = row.child(div().pl(px(44.)).text_xs().text_color(muted).child("↪ reply to an earlier message"));
         }
-        row = row.child(self.render_message(root, cx));
+        row = row.child(self.render_message(root, today, cx));
 
         if let Some(&last) = thread.replies.last() {
             let count = thread.replies.len();
@@ -161,7 +178,9 @@ impl FrillogramApp {
                     .on_click(cx.listener(move |this, _, window, cx| this.open_thread(Some(root_id), window, cx)))
                     .child(div().text_color(link).font_weight(FontWeight::SEMIBOLD).child(label))
                     .child(
-                        div().text_color(muted).child(format!("Last reply {}", format_time(self.messages[last].date))),
+                        div()
+                            .text_color(muted)
+                            .child(format!("Last reply {}", format_time(self.messages[last].date, today))),
                     ),
             );
         } else {
@@ -184,7 +203,7 @@ impl FrillogramApp {
         row
     }
 
-    fn render_thread_panel(&self, root_id: i64, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_thread_panel(&self, root_id: i64, today: NaiveDate, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
         let thread = self.threads.iter().find(|t| self.messages[t.root].id == root_id);
         let messages: Vec<&Msg> = thread
@@ -221,12 +240,12 @@ impl FrillogramApp {
                     .px_4()
                     .py_2()
                     .gap_2()
-                    .children(messages.into_iter().map(|m| self.render_message(m, cx))),
+                    .children(messages.into_iter().map(|m| self.render_message(m, today, cx))),
             )
             .child(div().p_3().border_t_1().border_color(border).child(Textarea::new(&self.thread_composer)))
     }
 
-    fn render_message(&self, message: &Msg, cx: &App) -> Div {
+    fn render_message(&self, message: &Msg, today: NaiveDate, cx: &App) -> Div {
         let name = self.sender_name(message.sender);
         let sender_id = match message.sender {
             SenderId::User(id) | SenderId::Chat(id) => id,
@@ -240,7 +259,7 @@ impl FrillogramApp {
                     h_flex()
                         .gap_2()
                         .child(div().font_weight(FontWeight::BOLD).child(name))
-                        .child(div().text_xs().text_color(muted).child(format_time(message.date)))
+                        .child(div().text_xs().text_color(muted).child(format_time(message.date, today)))
                         .when(message.send_state == SendState::Failed, |header| {
                             header.child(div().text_xs().text_color(danger).child("Not sent"))
                         }),
@@ -271,12 +290,8 @@ fn avatar(name: &str, id: i64) -> impl IntoElement {
         .child(initial)
 }
 
-fn format_time(timestamp: i32) -> String {
+fn format_time(timestamp: i32, today: NaiveDate) -> String {
     let Some(time) = DateTime::from_timestamp(timestamp.into(), 0) else { return String::new() };
     let time = time.with_timezone(&Local);
-    if time.date_naive() == Local::now().date_naive() {
-        time.format("%H:%M").to_string()
-    } else {
-        time.format("%b %-d, %H:%M").to_string()
-    }
+    if time.date_naive() == today { time.format("%H:%M").to_string() } else { time.format("%b %-d, %H:%M").to_string() }
 }

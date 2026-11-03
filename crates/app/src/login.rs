@@ -11,6 +11,10 @@ use gpui_kit::{
 
 use crate::app::FrillogramApp;
 
+/// The launch command the setup screen suggests; SETUP.md has the other ways.
+const RUN_WITH_PASS: &str =
+    "FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogram/api_hash) cargo run";
+
 impl FrillogramApp {
     pub(crate) fn render_setup(&self, error: String, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
@@ -18,11 +22,10 @@ impl FrillogramApp {
             card(cx)
                 .child(div().text_xl().font_weight(FontWeight::BOLD).child("Frillogram needs API credentials"))
                 .child(div().text_color(cx.theme().danger).child(error))
-                .child(
-                    div()
-                        .text_color(muted)
-                        .child("Create an app at my.telegram.org → API development tools, then start Frillogram with:"),
-                )
+                .child(div().text_color(muted).child(
+                    "Create an app at my.telegram.org → API development tools, then start Frillogram with the \
+                     credentials set, for example from pass:",
+                ))
                 .child(
                     div()
                         .p_3()
@@ -30,8 +33,12 @@ impl FrillogramApp {
                         .bg(cx.theme().muted)
                         .font_family("monospace")
                         .text_sm()
-                        .child("FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=abc… cargo run"),
-                ),
+                        .child(RUN_WITH_PASS),
+                )
+                .child(div().text_color(muted).child(
+                    "SETUP.md also covers a private .env file. Avoid typing the hash itself on the command line, \
+                     where it stays in your shell history.",
+                )),
         )
     }
 
