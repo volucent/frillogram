@@ -1,0 +1,14 @@
+[package]
+name = "frillogram-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-channel = "2"
+dirs = "6"
+futures-executor = "0.3"
+tdlib-rs = { version = "1.4", features = ["download-tdlib", "static"] }
+
+[build-dependencies]
+tdlib-rs = { version = "1.4", features = ["download-tdlib", "static"] }
