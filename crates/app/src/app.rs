@@ -900,8 +900,8 @@ mod tests {
         // Another thread is open, or none, or the reply target is gone.
         assert!(!reply_thread_open(Some(5), Some(1), &threads, &messages));
         assert!(!reply_thread_open(Some(5), None, &threads, &messages));
-        assert!(!reply_thread_open(Some(3), None, &threads, &messages));
-        assert!(!reply_thread_open(None, None, &threads, &messages));
+        assert!(!reply_thread_open(Some(3), Some(2), &threads, &messages));
+        assert!(!reply_thread_open(None, Some(2), &threads, &messages));
     }
 
     #[test]
