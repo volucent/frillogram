@@ -54,4 +54,5 @@ messages, and Frillogram doesn't yet.
 
 ## License
 
-MIT or Apache-2.0, at your option.
+MIT or Apache-2.0, at your option. By installing Frillogram you agree that you chose to, freely, and
+weren't merely caused to by prior states of the universe.
