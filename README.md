@@ -19,20 +19,12 @@ Telegram apps see a normal reply. Nothing is stored outside Telegram.
 
 ## Run it
 
-You need Rust ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials:
-
-1. Log in at [my.telegram.org](https://my.telegram.org) → **API development tools** and create an app.
-2. Run Frillogram with the `api_id` and `api_hash` it gives you:
+You need Rust ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
+[my.telegram.org](https://my.telegram.org). [SETUP.md](SETUP.md) walks through getting them, then:
 
 ```sh
-FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef cargo run
+FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef cargo run
 ```
-
-The first build downloads a prebuilt TDLib and links it into the binary, and takes a few minutes.
-
-Keep your API credentials out of the repository. TDLib's database (your session and message cache) lives in
-`~/Library/Application Support/frillogram` on macOS and `~/.local/share/frillogram` on Linux; set
-`FRILLOGRAM_DATA_DIR` to put it somewhere else. It isn't encrypted yet.
 
 ## Layout
 
