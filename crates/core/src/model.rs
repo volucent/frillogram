@@ -22,6 +22,17 @@ pub struct Msg {
     /// The message this one replies to, if it is in the same chat.
     pub reply_to: Option<i64>,
     pub outgoing: bool,
+    pub send_state: SendState,
+}
+
+/// Whether a message has reached Telegram's servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendState {
+    Sent,
+    /// Sent from here and still on its way.
+    Pending,
+    /// Sent from here and rejected; TDLib keeps it in the chat.
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +44,7 @@ pub struct ChatSummary {
     /// Position in the main chat list; 0 means the chat is not in it.
     /// Chats sort by `(order, id)` descending, which also puts pinned chats first.
     pub order: i64,
+    pub is_channel: bool,
 }
 
 /// What the login screen should ask for next.
@@ -47,11 +59,7 @@ pub enum AuthStep {
     Password {
         hint: String,
     },
-    /// Login confirmed by scanning this `tg://login` link as a QR code in another app.
-    OtherDevice {
-        link: String,
-    },
-    /// A step Frillogram can't handle yet (email login, sign-up, Premium purchase).
+    /// A step Frillogram can't handle yet (QR or email login, sign-up, Premium purchase).
     Unsupported(String),
     Ready,
     Closed,
@@ -69,7 +77,7 @@ pub enum Event {
     ChatLastMessage {
         chat_id: i64,
         preview: Option<String>,
-        order: Option<i64>,
+        order: i64,
     },
     ChatOrder {
         chat_id: i64,
@@ -85,6 +93,24 @@ pub enum Event {
         old_id: i64,
         message: Msg,
     },
+    /// A message sent from here was rejected, with Telegram's reason. TDLib
+    /// keeps it in the chat as `message`, under a new id.
+    MessageSendFailed {
+        old_id: i64,
+        message: Msg,
+        error: String,
+    },
+    /// Messages were deleted for good (not just dropped from TDLib's cache).
+    MessagesDeleted {
+        chat_id: i64,
+        message_ids: Vec<i64>,
+    },
+    /// A message's content changed, e.g. after an edit.
+    MessageText {
+        chat_id: i64,
+        message_id: i64,
+        text: String,
+    },
     User {
         id: i64,
         name: String,
@@ -99,11 +125,13 @@ impl Event {
             U::AuthorizationState(u) => Event::Auth(AuthStep::from(u.authorization_state)),
             U::NewChat(u) => Event::Chat(ChatSummary::from(u.chat)),
             U::ChatTitle(u) => Event::ChatTitle { chat_id: u.chat_id, title: u.title },
+            // `positions` is the chat's full list, so a missing Main entry means 0.
             U::ChatLastMessage(u) => Event::ChatLastMessage {
                 chat_id: u.chat_id,
                 preview: u.last_message.as_ref().map(preview),
                 order: main_list_order(&u.positions),
             },
+            U::ChatDraftMessage(u) => Event::ChatOrder { chat_id: u.chat_id, order: main_list_order(&u.positions) },
             U::ChatPosition(u) => match u.position.list {
                 enums::ChatList::Main => Event::ChatOrder { chat_id: u.chat_id, order: u.position.order },
                 _ => return None,
@@ -112,6 +140,17 @@ impl Event {
             U::NewMessage(u) => Event::NewMessage(Msg::from(u.message)),
             U::MessageSendSucceeded(u) => {
                 Event::MessageSent { old_id: u.old_message_id, message: Msg::from(u.message) }
+            }
+            U::MessageSendFailed(u) => Event::MessageSendFailed {
+                old_id: u.old_message_id,
+                message: Msg::from(u.message),
+                error: u.error.message,
+            },
+            U::DeleteMessages(u) if u.is_permanent => {
+                Event::MessagesDeleted { chat_id: u.chat_id, message_ids: u.message_ids }
+            }
+            U::MessageContent(u) => {
+                Event::MessageText { chat_id: u.chat_id, message_id: u.message_id, text: content_text(&u.new_content) }
             }
             U::User(u) => Event::User { id: u.user.id, name: user_name(&u.user) },
             _ => return None,
@@ -125,9 +164,9 @@ impl From<enums::AuthorizationState> for AuthStep {
         match state {
             A::WaitTdlibParameters => AuthStep::Starting,
             A::WaitPhoneNumber => AuthStep::Phone,
-            A::WaitCode(s) => AuthStep::Code { hint: format!("Code sent to {}", s.code_info.phone_number) },
+            A::WaitCode(s) => AuthStep::Code { hint: code_hint(&s.code_info) },
             A::WaitPassword(s) => AuthStep::Password { hint: s.password_hint },
-            A::WaitOtherDeviceConfirmation(s) => AuthStep::OtherDevice { link: s.link },
+            A::WaitOtherDeviceConfirmation(_) => AuthStep::Unsupported("QR code login isn't supported yet.".into()),
             A::WaitEmailAddress(_) | A::WaitEmailCode(_) => {
                 AuthStep::Unsupported("Email login isn't supported yet.".into())
             }
@@ -151,7 +190,8 @@ impl From<types::Chat> for ChatSummary {
             title: chat.title,
             last_message: chat.last_message.as_ref().map(preview),
             unread: chat.unread_count,
-            order: main_list_order(&chat.positions).unwrap_or(0),
+            order: main_list_order(&chat.positions),
+            is_channel: matches!(chat.r#type, enums::ChatType::Supergroup(ref s) if s.is_channel),
         }
     }
 }
@@ -177,12 +217,32 @@ impl From<types::Message> for Msg {
             text: content_text(&message.content),
             reply_to,
             outgoing: message.is_outgoing,
+            send_state: match message.sending_state {
+                None => SendState::Sent,
+                Some(enums::MessageSendingState::Pending(_)) => SendState::Pending,
+                Some(enums::MessageSendingState::Failed(_)) => SendState::Failed,
+            },
         }
     }
 }
 
-fn main_list_order(positions: &[types::ChatPosition]) -> Option<i64> {
-    positions.iter().find(|p| matches!(p.list, enums::ChatList::Main)).map(|p| p.order)
+/// Where the login code went, e.g. "Code sent by SMS to +1 555 123 4567".
+fn code_hint(info: &types::AuthenticationCodeInfo) -> String {
+    use enums::AuthenticationCodeType as T;
+    let phone = &info.phone_number;
+    match &info.r#type {
+        T::TelegramMessage(_) => format!("Code sent to your Telegram app on another device ({phone})."),
+        T::Sms(_) | T::SmsWord(_) | T::SmsPhrase(_) => format!("Code sent by SMS to {phone}."),
+        T::Call(_) => format!("You'll get a call at {phone} with the code."),
+        T::FlashCall(_) | T::MissedCall(_) => format!("Code sent to {phone} as a phone call."),
+        T::Fragment(_) => format!("Code sent to {phone} on fragment.com."),
+        _ => format!("Code sent to {phone}."),
+    }
+}
+
+/// The chat's order in the main list, or 0 if it isn't in it.
+fn main_list_order(positions: &[types::ChatPosition]) -> i64 {
+    positions.iter().find(|p| matches!(p.list, enums::ChatList::Main)).map_or(0, |p| p.order)
 }
 
 fn user_name(user: &types::User) -> String {

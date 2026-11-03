@@ -1,9 +1,9 @@
-use frillogram_core::AuthStep;
+use frillogram_core::{AuthStep, ConfigError};
 use gpui_kit::{
     component::{
         ActiveTheme, Disableable,
         button::{Button, ButtonVariants},
-        input::Input,
+        input::{Input, InputState},
         v_flex,
     },
     *,
@@ -11,18 +11,22 @@ use gpui_kit::{
 
 use crate::app::FrillogramApp;
 
+/// The launch command the setup screen suggests; SETUP.md has the other ways.
+const RUN_WITH_PASS: &str =
+    "FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogram/api_hash) cargo run";
+
 impl FrillogramApp {
-    pub(crate) fn render_setup(&self, error: String, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_setup(&self, error: &ConfigError, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        centered(
-            card(cx)
-                .child(div().text_xl().font_weight(FontWeight::BOLD).child("Frillogram needs API credentials"))
-                .child(div().text_color(cx.theme().danger).child(error))
-                .child(
-                    div()
-                        .text_color(muted)
-                        .child("Create an app at my.telegram.org → API development tools, then start Frillogram with:"),
-                )
+        let card = card(cx)
+            .child(div().text_xl().font_weight(FontWeight::BOLD).child("Frillogram can't start"))
+            .child(div().text_color(cx.theme().danger).child(error.to_string()));
+        let card = match error {
+            ConfigError::Credentials(_) => card
+                .child(div().text_color(muted).child(
+                    "Create an app at my.telegram.org → API development tools, then start Frillogram with the \
+                     credentials set, for example from pass:",
+                ))
                 .child(
                     div()
                         .p_3()
@@ -30,9 +34,19 @@ impl FrillogramApp {
                         .bg(cx.theme().muted)
                         .font_family("monospace")
                         .text_sm()
-                        .child("FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=abc… cargo run"),
-                ),
-        )
+                        .child(RUN_WITH_PASS),
+                )
+                .child(div().text_color(muted).child(
+                    "SETUP.md also covers a private .env file. Avoid typing the hash itself on the command line, \
+                     where it stays in your shell history.",
+                )),
+            ConfigError::DataDir(_) => card.child(
+                div()
+                    .text_color(muted)
+                    .child("SETUP.md’s “Where data is kept” explains where Frillogram keeps its data."),
+            ),
+        };
+        centered(card)
     }
 
     pub(crate) fn render_login(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -46,9 +60,6 @@ impl FrillogramApp {
                 let hint =
                     if hint.is_empty() { "Two-step verification is on.".into() } else { format!("Hint: {hint}") };
                 ("Enter your password", hint, Some(&self.password_input))
-            }
-            AuthStep::OtherDevice { link } => {
-                ("Confirm on another device", format!("Open this link in a logged-in Telegram app: {link}"), None)
             }
             AuthStep::Unsupported(reason) => ("Can't log in here yet", reason.clone(), None),
             AuthStep::Starting | AuthStep::Ready => ("Connecting…", String::new(), None),
@@ -68,20 +79,25 @@ impl FrillogramApp {
                     .on_click(cx.listener(|this, _, window, cx| this.submit_login(window, cx))),
             );
         }
-        if let Some(error) = &self.error {
-            card = card.child(div().text_color(cx.theme().danger).child(error.clone()));
+        if let Some(error) = self.error.text() {
+            card = card.child(div().text_color(cx.theme().danger).child(error));
         }
         centered(card)
     }
 
     pub(crate) fn focus_login_input(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = match self.auth {
-            AuthStep::Phone => &self.phone_input,
-            AuthStep::Code { .. } => &self.code_input,
-            AuthStep::Password { .. } => &self.password_input,
-            _ => return,
-        };
+        let Some(input) = self.login_input(&self.auth) else { return };
         input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// The input that answers `step`, if it asks for one.
+    pub(crate) fn login_input(&self, step: &AuthStep) -> Option<&Entity<InputState>> {
+        match step {
+            AuthStep::Phone => Some(&self.phone_input),
+            AuthStep::Code { .. } => Some(&self.code_input),
+            AuthStep::Password { .. } => Some(&self.password_input),
+            _ => None,
+        }
     }
 }
 

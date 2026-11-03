@@ -1856,7 +1856,6 @@ dependencies = [
 name = "frillogram"
 version = "0.1.0"
 dependencies = [
- "async-channel",
  "chrono",
  "frillogram-core",
  "gpui-kit",

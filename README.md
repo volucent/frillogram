@@ -15,15 +15,18 @@ to it (directly or through other replies) form one thread. The chat shows each t
 with a "N replies" link, and the thread opens in a side panel.
 
 Replying in a thread sends an ordinary Telegram reply to the thread's first message, so people on other
-Telegram apps see a normal reply. Nothing is stored outside Telegram.
+Telegram apps see a normal reply. Frillogram adds no storage of its own; TDLib keeps your session and a
+message cache on this machine (see [where data is kept](SETUP.md#where-data-is-kept)).
 
 ## Run it
 
-You need Rust ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
-[my.telegram.org](https://my.telegram.org). [SETUP.md](SETUP.md) walks through getting them, then:
+You need Rust 1.92 or newer ([rustup.rs](https://rustup.rs)) and your own Telegram API credentials from
+[my.telegram.org](https://my.telegram.org). [SETUP.md](SETUP.md) walks through getting them and passing
+them in without leaving the `api_hash` in your shell history, from [`pass`](https://www.passwordstore.org)
+or a private `.env` file:
 
 ```sh
-FRILLOGRAM_API_ID=12345 FRILLOGRAM_API_HASH=0123456789abcdef0123456789abcdef cargo run
+FRILLOGRAM_API_ID=$(pass frillogram/api_id) FRILLOGRAM_API_HASH=$(pass frillogram/api_hash) cargo run
 ```
 
 ## Layout
@@ -45,8 +48,9 @@ loading older messages, forum topics, packaging.
 
 Frillogram follows Telegram's [API Terms of Service](https://core.telegram.org/api/terms): every user
 brings their own `api_id`, the name doesn't use "Telegram" and the logo isn't used, and core behavior
-(read receipts, online status, self-destructing messages) is left as Telegram intends. If channel
-viewing is added, it has to show Telegram's sponsored messages.
+(read receipts, online status, self-destructing messages) is left as Telegram intends. Channels are
+hidden from the chat list for now: a client that shows channels has to show Telegram's sponsored
+messages, and Frillogram doesn't yet.
 
 ## License
 
