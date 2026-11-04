@@ -106,6 +106,14 @@ The first build downloads a prebuilt TDLib from the
 [tdlib-rs project's GitHub releases](https://github.com/FedericoBruzzone/tdlib-rs/releases) and links it into
 the binary, and takes a few minutes.
 
+### Try it without an account
+
+`frillogram --preview` (`cargo run -- --preview`) opens a window of made-up sample chats instead of
+connecting to Telegram. It needs no credentials, so `api_hash_command` isn't run, and nothing is sent,
+downloaded or stored: opening a chat shows its sample messages, and what you send is only added to the
+window. It still reads your config file, and reports errors in it as usual, so it's a quick way to try
+colors, fonts and sizes, or to look at the app on a machine without a Telegram login.
+
 ### Linux prerequisites
 
 The Linux build hasn't been verified yet. TDLib is linked against LLVM's libc++, and GPUI's X11/Wayland

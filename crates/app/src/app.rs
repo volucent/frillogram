@@ -20,7 +20,7 @@ use gpui_kit::{
 use crate::{
     chat::{RowFacts, RowLook, row_looks},
     media::MediaState,
-    theme,
+    preview, theme,
 };
 
 /// How many chats to ask TDLib for per request after login.
@@ -32,6 +32,8 @@ pub struct FrillogramApp {
     /// What `config.toml` set, or the defaults if it has an error.
     pub(crate) settings: Settings,
     pub(crate) tg: Option<Telegram>,
+    /// `--preview`: sample chats instead of Telegram, so `tg` stays `None`.
+    pub(crate) preview: bool,
     /// Set when the app can't start at all, e.g. API credentials are missing
     /// or the config file has an error.
     pub(crate) setup_error: Option<ConfigError>,
@@ -103,7 +105,7 @@ pub struct FrillogramApp {
 impl FrillogramApp {
     pub fn new(
         settings: Settings,
-        config: Result<Config, ConfigError>,
+        config: Result<Option<Config>, ConfigError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -178,12 +180,15 @@ impl FrillogramApp {
             ));
         }
 
-        let media = MediaState::new(config.as_ref().ok().map(|config| config.data_dir.clone()));
+        let data_dir = config.as_ref().ok().and_then(Option::as_ref).map(|config| config.data_dir.clone());
+        let media = MediaState::new(data_dir);
+        let preview = matches!(config, Ok(None));
         let (tg, setup_error, events) = match config {
-            Ok(config) => {
+            Ok(Some(config)) => {
                 let (tg, events) = Telegram::start(config);
                 (Some(tg), None, Some(events))
             }
+            Ok(None) => (None, None, None),
             Err(error) => (None, Some(error), None),
         };
         let _events = events.map(|events| {
@@ -196,9 +201,10 @@ impl FrillogramApp {
             })
         });
 
-        FrillogramApp {
+        let mut app = FrillogramApp {
             settings,
             tg,
+            preview,
             setup_error,
             auth: AuthStep::Starting,
             error: ErrorBanner::default(),
@@ -233,7 +239,25 @@ impl FrillogramApp {
             moving_window: false,
             _subscriptions: subscriptions,
             _events,
+        };
+        if preview {
+            app.load_preview();
         }
+        app
+    }
+
+    /// Fills the chat list with `--preview`'s sample chats, as if logged in.
+    fn load_preview(&mut self) {
+        self.user_names = preview::user_names();
+        for chat in preview::chats() {
+            // A private chat's id is its person's, who sends its messages.
+            if chat.id > 0 {
+                self.user_names.entry(chat.id).or_insert_with(|| chat.title.clone());
+            }
+            self.chats.insert(chat.id, chat);
+        }
+        self.chats_dirty = true;
+        self.auth = AuthStep::Ready;
     }
 
     fn handle_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
@@ -412,7 +436,10 @@ impl FrillogramApp {
     }
 
     pub(crate) fn select_chat(&mut self, chat_id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tg) = self.tg else { return };
+        let tg = self.tg;
+        if tg.is_none() && !self.preview {
+            return;
+        }
         if self.selected_chat == Some(chat_id) && !self.load_failed {
             return;
         }
@@ -447,6 +474,16 @@ impl FrillogramApp {
             self.show_error(error, Some(chat_id));
         }
         self.composer.update(cx, |input, cx| input.focus(window, cx));
+        let Some(tg) = tg else {
+            // `--preview`: the sample chat's messages, read at once.
+            self.messages = preview::messages(chat_id, chrono::Local::now().timestamp() as i32);
+            self.changes_while_loading = None;
+            if let Some(chat) = self.chats.get_mut(&chat_id) {
+                chat.unread = 0;
+            }
+            self.rethread(window, cx);
+            return;
+        };
         // Only a chat that was actually opened is closed, so a load that
         // never got to open its chat can't close one opened elsewhere.
         let to_close = self.opened_chat.take();
@@ -566,6 +603,34 @@ impl FrillogramApp {
         self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
     }
 
+    fn add_preview_message(
+        &mut self,
+        chat_id: i64,
+        text: String,
+        reply_to: Option<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.messages.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+        if let Some(chat) = self.chats.get_mut(&chat_id) {
+            chat.last_message = Some(format!("You: {text}"));
+        }
+        self.messages.push(Msg {
+            id,
+            chat_id,
+            sender: SenderId::User(preview::ME),
+            date: chrono::Local::now().timestamp() as i32,
+            text,
+            media: None,
+            reply_to,
+            outgoing: true,
+            send_state: SendState::Sent,
+            can_be_saved: true,
+        });
+        self.rethread(window, cx);
+        cx.notify();
+    }
+
     /// The send state of the open thread's root, if it's loaded.
     pub(crate) fn thread_root_state(&self) -> Option<SendState> {
         let root_id = self.open_thread?;
@@ -573,7 +638,10 @@ impl FrillogramApp {
     }
 
     pub(crate) fn send_from_composer(&mut self, in_thread: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(tg), Some(chat_id)) = (self.tg, self.selected_chat) else { return };
+        let Some(chat_id) = self.selected_chat else { return };
+        if self.tg.is_none() && !self.preview {
+            return;
+        }
         let input = if in_thread { self.thread_composer.clone() } else { self.composer.clone() };
         let text = input.read(cx).value().trim().to_string();
         if text.is_empty() {
@@ -581,6 +649,11 @@ impl FrillogramApp {
         }
         let Some(reply_to) = self.reply_target(in_thread, chat_id, cx) else { return };
         input.update(cx, |input, cx| input.set_value("", window, cx));
+        let Some(tg) = self.tg else {
+            // `--preview`: the message shows as sent, and goes nowhere.
+            self.add_preview_message(chat_id, text, reply_to, window, cx);
+            return;
+        };
 
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = tg.send_text(chat_id, text.clone(), reply_to).await {

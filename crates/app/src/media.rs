@@ -754,6 +754,16 @@ impl FrillogramApp {
         cx.notify();
     }
 
+    /// Says so, instead of doing nothing, when an image is sent in
+    /// `--preview`, which has no Telegram to send it to.
+    fn refuse_images_in_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.preview {
+            self.show_error("Images aren't sent in --preview; only text is added to the window.".into(), None);
+            cx.notify();
+        }
+        self.preview
+    }
+
     /// Shows an error about `chat_id`'s media, or a general one without it.
     fn media_error(&mut self, chat_id: Option<i64>, error: String) {
         match chat_id {
@@ -817,6 +827,9 @@ impl FrillogramApp {
         // Decided now: the picker doesn't block the app, and the user may go
         // to another chat or thread before closing it. The files still go
         // where Attach was clicked.
+        if self.refuse_images_in_preview(cx) {
+            return;
+        }
         let Some(target) = self.send_target(in_thread, cx) else { return };
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -850,6 +863,9 @@ impl FrillogramApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_images_in_preview(cx) {
+            return;
+        }
         if let Some(target) = self.send_target(in_thread, cx) {
             self.send_files_to(target, paths, false, window, cx);
         }
@@ -943,6 +959,9 @@ impl FrillogramApp {
     /// Sends an image pasted into a composer, saved as a file first since
     /// TDLib uploads from a path.
     fn send_pasted_image(&mut self, image: &Image, in_thread: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_images_in_preview(cx) {
+            return;
+        }
         let Some(extension) = paste_extension(image.format) else {
             self.show_error(
                 "Can't send this kind of image: paste a PNG, JPEG, WebP or GIF.".into(),

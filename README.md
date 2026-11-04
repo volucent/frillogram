@@ -35,6 +35,12 @@ api_hash_command = "pass frillogram/api_hash"
 
 Then `cargo run`. Environment variables work too, and SETUP.md covers them.
 
+To see what Frillogram looks like first, or to try a theme, without any account or credentials:
+
+```sh
+cargo run -- --preview
+```
+
 ## Configuration
 
 Everything you can change (theme, every color of the light and dark palettes, font, sizes, time formats,

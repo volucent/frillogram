@@ -3,6 +3,7 @@ mod args;
 mod chat;
 mod login;
 mod media;
+mod preview;
 mod theme;
 
 use std::borrow::Cow;
@@ -15,8 +16,8 @@ use crate::{
 };
 
 fn main() {
-    let config_path = match args::parse(std::env::args_os().skip(1)) {
-        Ok(Command::Run { config }) => config,
+    let (config_path, preview) = match args::parse(std::env::args_os().skip(1)) {
+        Ok(Command::Run { config, preview }) => (config, preview),
         Ok(Command::PrintDefaultConfig) => {
             print!("{}", frillogram_core::config::EXAMPLE);
             return;
@@ -31,7 +32,7 @@ fn main() {
         }
     };
     // Before the window opens: `api_hash_command` may ask for a passphrase.
-    let mut loaded = frillogram_core::config::load(config_path);
+    let mut loaded = frillogram_core::config::load(config_path, !preview);
 
     // There's no menu, Cmd+Q or Dock reopen, so on macOS a process left
     // without its window would keep TDLib running with no way back to it.

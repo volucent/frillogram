@@ -633,20 +633,24 @@ pub struct Loaded {
     pub settings: Settings,
     /// Where the config file is or would be; `None` without a home directory.
     pub path: Option<PathBuf>,
-    /// The TDLib configuration, or why Frillogram can't start.
-    pub config: Result<Config, ConfigError>,
+    /// The TDLib configuration, `None` when no connection was asked for
+    /// (`--preview`), or why Frillogram can't start.
+    pub config: Result<Option<Config>, ConfigError>,
 }
 
-/// Loads the config file (`flag` is `--config`) and resolves the TDLib
-/// configuration from it and the environment.
-pub fn load(flag: Option<PathBuf>) -> Loaded {
-    load_with(flag, |name| std::env::var_os(name), dirs::home_dir(), dirs::data_local_dir)
+/// Loads the config file (`flag` is `--config`) and, unless `connect` is
+/// false, resolves the TDLib configuration from it and the environment.
+/// Without `connect` the credentials aren't looked at, so `api_hash_command`
+/// never runs, but the file is still checked.
+pub fn load(flag: Option<PathBuf>, connect: bool) -> Loaded {
+    load_with(flag, connect, |name| std::env::var_os(name), dirs::home_dir(), dirs::data_local_dir)
 }
 
 /// [`load`] with the environment, home and default data directory passed in,
 /// so it can be tested.
 fn load_with(
     flag: Option<PathBuf>,
+    connect: bool,
     var: impl Fn(&str) -> Option<OsString>,
     home: Option<PathBuf>,
     default_dir: impl FnOnce() -> Option<PathBuf>,
@@ -658,9 +662,10 @@ fn load_with(
         None => Ok(Settings::default()),
     };
     match settings {
+        Ok(settings) if !connect => Loaded { settings, path, config: Ok(None) },
         Ok(settings) => {
             let config = Config::resolve(&settings.telegram, path.as_deref(), &var, home.as_deref(), default_dir);
-            Loaded { settings, path, config }
+            Loaded { settings, path, config: config.map(Some) }
         }
         Err(error) => Loaded { settings: Settings::default(), path, config: Err(error) },
     }
@@ -1396,8 +1401,23 @@ mod tests {
     }
 
     fn load_test(flag: Option<PathBuf>, vars: &[(&str, &str)]) -> Loaded {
+        load_test_with(flag, true, vars)
+    }
+
+    fn load_test_with(flag: Option<PathBuf>, connect: bool, vars: &[(&str, &str)]) -> Loaded {
         let var = vars_from(vars.iter().map(|&(name, value)| (name, value.into())).collect());
-        load_with(flag, var, Some("/nonexistent-home".into()), || Some(PathBuf::from("/data")))
+        load_with(flag, connect, var, Some("/nonexistent-home".into()), || Some(PathBuf::from("/data")))
+    }
+
+    #[test]
+    fn without_connecting_the_file_is_checked_but_credentials_are_not() {
+        // No api_id and a command that would fail: neither matters for a preview.
+        let file = TempFile::new("preview", "[telegram]\napi_hash_command = \"exit 1\"\n[chats]\nhistory_limit = 5\n");
+        let loaded = load_test_with(Some(file.0.clone()), false, &[]);
+        assert_eq!(loaded.settings.chats.history_limit, 5);
+        assert!(matches!(loaded.config, Ok(None)));
+        let bad = TempFile::new("preview-bad", "[layout]\nsidebar_width = 1\n");
+        assert!(matches!(load_test_with(Some(bad.0.clone()), false, &[]).config, Err(ConfigError::File(_))));
     }
 
     #[test]
@@ -1405,7 +1425,7 @@ mod tests {
         let loaded = load_test(None, &CREDENTIALS);
         assert_eq!(loaded.settings, Settings::default());
         assert_eq!(loaded.path, Some("/nonexistent-home/.config/frillogram/config.toml".into()));
-        assert_eq!(loaded.config.unwrap().api_id, 123);
+        assert_eq!(loaded.config.unwrap().unwrap().api_id, 123);
     }
 
     #[test]
@@ -1426,7 +1446,7 @@ mod tests {
         );
         let loaded = load_test(Some(file.0.clone()), &[]);
         assert_eq!(loaded.settings.chats.history_limit, 5);
-        let config = loaded.config.unwrap();
+        let config = loaded.config.unwrap().unwrap();
         assert_eq!((config.api_id, config.api_hash.as_str()), (9, HASH));
         // A bad file keeps the defaults for the error screen.
         let file = TempFile::new("bad", "[layout]\nsidebar_width = 1\n");
@@ -1441,7 +1461,7 @@ mod tests {
         let loaded = |family: &str| {
             let mut settings = Settings::default();
             settings.appearance.font_family = Some(family.into());
-            Loaded { settings, path: Some(PATH.into()), config: config(&CREDENTIALS) }
+            Loaded { settings, path: Some(PATH.into()), config: config(&CREDENTIALS).map(Some) }
         };
         let mut known = loaded("Inter");
         known.check_font(&installed);

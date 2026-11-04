@@ -6,12 +6,14 @@ use std::{
 };
 
 pub const USAGE: &str = "\
-Usage: frillogram [--config <path>]
+Usage: frillogram [--config <path>] [--preview]
        frillogram --print-default-config
        frillogram --help
 
 Options:
   --config <path>           Read the config file at <path>, which must exist
+  --preview                 Show sample chats with the config's look, without Telegram:
+                            no credentials, no login, nothing sent or stored
   --print-default-config    Print the example config file, with every key at its default
   -h, --help                Print this help
 
@@ -21,9 +23,11 @@ SETUP.md describes the keys and the environment variables that override them.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Start the app, with the config file `--config` named, if any.
+    /// Start the app, with the config file `--config` named, if any, and
+    /// with sample chats instead of Telegram for `--preview`.
     Run {
         config: Option<PathBuf>,
+        preview: bool,
     },
     PrintDefaultConfig,
     Help,
@@ -33,10 +37,15 @@ pub enum Command {
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut args = args.into_iter();
     let mut config = None;
+    let mut preview = false;
     while let Some(arg) = args.next() {
         let path = match arg.to_str() {
             Some("-h" | "--help") => return Ok(Command::Help),
             Some("--print-default-config") => return Ok(Command::PrintDefaultConfig),
+            Some("--preview") => {
+                preview = true;
+                continue;
+            }
             Some("--config") => args.next(),
             _ => match inline_config(&arg) {
                 Some(path) => Some(path),
@@ -48,7 +57,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             return Err("--config is given twice".into());
         }
     }
-    Ok(Command::Run { config })
+    Ok(Command::Run { config, preview })
 }
 
 /// The path of a `--config=<path>` argument. On Unix a path is any bytes, not
@@ -75,12 +84,20 @@ mod tests {
 
     #[test]
     fn no_arguments_run_with_the_default_config() {
-        assert_eq!(parse_strs(&[]), Ok(Command::Run { config: None }));
+        assert_eq!(parse_strs(&[]), Ok(Command::Run { config: None, preview: false }));
+    }
+
+    #[test]
+    fn preview_goes_with_or_without_a_config() {
+        assert_eq!(parse_strs(&["--preview"]), Ok(Command::Run { config: None, preview: true }));
+        let run = Ok(Command::Run { config: Some("a.toml".into()), preview: true });
+        assert_eq!(parse_strs(&["--preview", "--config", "a.toml"]), run);
+        assert_eq!(parse_strs(&["--config=a.toml", "--preview"]), run);
     }
 
     #[test]
     fn config_takes_a_path() {
-        let run = Ok(Command::Run { config: Some("/x/config.toml".into()) });
+        let run = Ok(Command::Run { config: Some("/x/config.toml".into()), preview: false });
         assert_eq!(parse_strs(&["--config", "/x/config.toml"]), run);
         assert_eq!(parse_strs(&["--config=/x/config.toml"]), run);
         assert_eq!(parse_strs(&["--config"]), Err("--config needs a path".into()));
@@ -94,7 +111,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let path = OsStr::from_bytes(b"/x/\xffconfig.toml");
-        let run = Ok(Command::Run { config: Some(path.into()) });
+        let run = Ok(Command::Run { config: Some(path.into()), preview: false });
         assert_eq!(parse([OsString::from("--config"), path.to_owned()]), run);
         let mut inline = OsString::from("--config=");
         inline.push(path);
